@@ -152,6 +152,7 @@ def run_2022_model(
     use_ob: bool = True,              # enable Order Block entries
     use_fvg: bool = True,             # enable FVG entries
     use_killzones: bool = False,      # restrict entries to NY/London sessions
+    allowed_killzones: set[str] | None = None,  # subset of killzones; None = all
 ) -> tuple[list[Trade], Diag]:
     """Run the 2022 model on *df1m* and return (trades, diagnostics)."""
 
@@ -353,7 +354,12 @@ def run_2022_model(
         # --------------------------------------------------------------
         if open_trade is None and is_armed:
             kz = _in_killzone(ts) if use_killzones else "no_filter"
-            if not use_killzones or kz is not None:
+            kz_allowed = (
+                not use_killzones
+                or (kz is not None
+                    and (allowed_killzones is None or kz in allowed_killzones))
+            )
+            if kz_allowed:
                 atr = _atr(h, l, i)
                 min_stop = max(min_stop_atr_mult * atr, min_stop_pts)
 

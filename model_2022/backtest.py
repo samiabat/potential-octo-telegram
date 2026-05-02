@@ -178,7 +178,8 @@ def plot_breakdown(tdf: pd.DataFrame, out_path: str,
 
 
 def plot_monthly(tdf: pd.DataFrame, out_path: str,
-                 risk_per_trade: float = 100.0) -> None:
+                 risk_per_trade: float = 100.0,
+                 title_suffix: str = "ICT 2022 Model") -> None:
     """Bar chart of monthly PnL."""
     if tdf.empty:
         return
@@ -192,7 +193,7 @@ def plot_monthly(tdf: pd.DataFrame, out_path: str,
     colors = ["tab:green" if v >= 0 else "tab:red" for v in monthly.values]
     ax.bar(monthly.index.astype(str), monthly.values, color=colors, edgecolor="black")
     ax.axhline(0, color="black", linewidth=0.8)
-    ax.set_title("Monthly PnL — ICT 2022 Model")
+    ax.set_title(f"Monthly PnL — {title_suffix}")
     ax.set_ylabel("PnL ($)")
     ax.set_xlabel("Month")
     ax.grid(alpha=0.3, axis="y")
@@ -200,6 +201,103 @@ def plot_monthly(tdf: pd.DataFrame, out_path: str,
     plt.tight_layout()
     plt.savefig(out_path, dpi=130)
     plt.close(fig)
+
+
+def plot_weekly(tdf: pd.DataFrame, out_path: str,
+                risk_per_trade: float = 100.0,
+                title_suffix: str = "ICT 2022 Model") -> None:
+    """Bar chart of weekly PnL (ISO week)."""
+    if tdf.empty:
+        return
+    t = tdf.copy()
+    dt = pd.to_datetime(tdf["exit_time"].fillna(tdf["entry_time"])).dt.tz_localize(None)
+    t["week"] = dt.dt.to_period("W")
+    weekly = t.groupby("week")["r"].sum() * risk_per_trade
+
+    fig, ax = plt.subplots(figsize=(max(14, len(weekly) // 2), 4))
+    colors = ["tab:green" if v >= 0 else "tab:red" for v in weekly.values]
+    labels = [str(w.start_time.strftime("%Y-%m-%d")) for w in weekly.index]
+    ax.bar(range(len(weekly)), weekly.values, color=colors, edgecolor="black")
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_title(f"Weekly PnL — {title_suffix}")
+    ax.set_ylabel("PnL ($)")
+    ax.set_xlabel("Week starting")
+    tick_step = max(1, len(weekly) // 20)
+    ax.set_xticks(range(0, len(weekly), tick_step))
+    ax.set_xticklabels(labels[::tick_step], rotation=45, ha="right", fontsize=8)
+    ax.grid(alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def plot_yearly(tdf: pd.DataFrame, out_path: str,
+                risk_per_trade: float = 100.0,
+                title_suffix: str = "ICT 2022 Model") -> None:
+    """Bar chart of yearly PnL with per-year stats annotated."""
+    if tdf.empty:
+        return
+    t = tdf.copy()
+    t["year"] = pd.to_datetime(
+        tdf["exit_time"].fillna(tdf["entry_time"])
+    ).dt.tz_localize(None).dt.year
+    grp = t.groupby("year")
+    yearly_pnl = grp["r"].sum() * risk_per_trade
+    yearly_wr  = grp["r"].apply(lambda x: (x > 0).mean() * 100)
+    yearly_cnt = grp["r"].count()
+
+    fig, ax = plt.subplots(figsize=(max(8, len(yearly_pnl) * 1.5), 5))
+    colors = ["tab:green" if v >= 0 else "tab:red" for v in yearly_pnl.values]
+    bars = ax.bar(yearly_pnl.index.astype(str), yearly_pnl.values,
+                  color=colors, edgecolor="black", width=0.6)
+    # Annotate each bar with trade count and win-rate
+    for bar, yr in zip(bars, yearly_pnl.index):
+        cnt = int(yearly_cnt[yr])
+        wr  = float(yearly_wr[yr])
+        y   = bar.get_height()
+        va  = "bottom" if y >= 0 else "top"
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                y + (5 if y >= 0 else -5),
+                f"{cnt}t  {wr:.0f}%wr", ha="center", va=va, fontsize=8)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_title(f"Yearly PnL — {title_suffix}")
+    ax.set_ylabel("PnL ($)")
+    ax.set_xlabel("Year")
+    ax.grid(alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def compute_period_stats(tdf: pd.DataFrame,
+                         risk_per_trade: float = 100.0) -> dict[str, pd.DataFrame]:
+    """Return weekly, monthly, and yearly breakdown DataFrames."""
+    if tdf.empty:
+        return {"weekly": pd.DataFrame(), "monthly": pd.DataFrame(), "yearly": pd.DataFrame()}
+
+    t = tdf.copy()
+    dt = pd.to_datetime(t["exit_time"].fillna(t["entry_time"])).dt.tz_localize(None)
+
+    t["week"]  = dt.dt.to_period("W")
+    t["month"] = dt.dt.to_period("M")
+    t["year"]  = dt.dt.year
+
+    def _agg(grp):
+        return grp["r"].agg(
+            trades="count",
+            wins=lambda x: int((x > 0).sum()),
+            losses=lambda x: int((x <= 0).sum()),
+            win_rate_pct=lambda x: round(float((x > 0).mean() * 100), 1),
+            mean_R="mean",
+            total_R="sum",
+            net_pnl=lambda x: round(float(x.sum() * risk_per_trade), 2),
+        ).round(3)
+
+    weekly  = _agg(t.groupby("week"))
+    monthly = _agg(t.groupby("month"))
+    yearly  = _agg(t.groupby("year"))
+
+    return {"weekly": weekly, "monthly": monthly, "yearly": yearly}
 
 
 # ---------------------------------------------------------------------------
