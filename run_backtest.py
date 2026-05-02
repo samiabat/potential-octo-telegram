@@ -1,4 +1,4 @@
-"""Entry point: loads data, runs Silver Bullet, writes stats + plots."""
+"""Entry point: loads data, runs Silver Bullet v2, writes stats + plots."""
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ DATA_PATH   = "5m_data.csv"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
-RISK_PER_TRADE = 100.0   # $ per 1R, with $10k starting equity
+RISK_PER_TRADE = 100.0
 RR = 2.0
 
 
@@ -26,9 +26,25 @@ def main() -> None:
     print("Resampling to 1H for HTF bias...")
     df1h = resample(df5, "1h")
 
-    print("Running Silver Bullet strategy...")
-    trades = run_silver_bullet(df5, df1h, rr=RR)
+    print("Running Silver Bullet v2 (killzone + quality FVG)...")
+    # Config selected from sweep_configs.py — bias/sweep/MSS gates were
+    # found to FILTER OUT winners on this dataset. The simple model wins.
+    trades, diag = run_silver_bullet(
+        df5, df1h,
+        rr=RR,
+        bias_filter="off",          # EMA-cross bias hurts; needs proper HTF DOL
+        require_sweep=False,        # liquidity-sweep gate hurts; reconsider when encoded properly
+        require_mss=False,
+        min_fvg_size_atr=0.3,       # FVG must be at least 0.3 ATR(14) wide
+        only_first_half_kz=True,    # entries only in first 30 mins of killzone
+        max_trades_per_kz=1,
+        fvg_max_age_bars=12,
+        trade_expiry_bars=24,
+    )
     print(f"  {len(trades)} trades generated")
+    print("\n--- Diagnostics ---")
+    for k, v in diag.__dict__.items():
+        print(f"  {k:<22} {v:>10,}")
 
     tdf = trades_to_df(trades)
     tdf.to_csv(RESULTS_DIR / "trades.csv", index=False)
@@ -39,16 +55,24 @@ def main() -> None:
     print("\n=== STATS ===")
     for k, v in stats.items():
         if isinstance(v, float):
-            print(f"  {k:<16} {v:>12,.2f}")
+            print(f"  {k:<16} {v:>14,.2f}")
         else:
-            print(f"  {k:<16} {v:>12}")
+            print(f"  {k:<16} {v:>14}")
     if by_kz is not None:
         print("\nBy killzone:")
         print(by_kz.to_string())
 
+    # Trades per year
+    if not tdf.empty:
+        years = (pd.to_datetime(tdf['entry_time'].iloc[-1]) -
+                 pd.to_datetime(tdf['entry_time'].iloc[0])).days / 365.25
+        print(f"\nTrades/year: {len(tdf)/years:.1f}    Trades/week: {len(tdf)/years/52:.1f}")
+
     with open(RESULTS_DIR / "stats.json", "w") as f:
-        json.dump({k: (v if not isinstance(v, float) else round(v, 4))
-                   for k, v in stats.items()}, f, indent=2)
+        out = {k: (round(v, 4) if isinstance(v, float) else v)
+               for k, v in stats.items()}
+        out["diagnostics"] = diag.__dict__
+        json.dump(out, f, indent=2)
     if by_kz is not None:
         by_kz.to_csv(RESULTS_DIR / "stats_by_killzone.csv")
 
