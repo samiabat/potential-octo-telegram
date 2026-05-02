@@ -125,3 +125,104 @@ results/
   equity_curve.png, killzone_breakdown.png
   trades.csv, stats.json, stats_by_killzone.csv, config_sweep.csv
 ```
+
+---
+
+# ICT 2022 Model — Flagship Mechanical Cascade (NAS 1m Backtest)
+
+Fully rule-based implementation of the ICT **2022 Model** (the "flagship"
+mechanical model) on the Nasdaq 1-minute data in `1m_data.csv`
+(Jul 2024 – Oct 2025).
+
+## Cascade (all gates required)
+
+```
+HTF Bias (4H EMA cross)
+  → Liquidity Sweep on 15m  (price wicks beyond a recent swing H/L and closes back inside)
+  → MSS / CHoCH on 15m      (structural break opposite to the sweep — confirmation)
+  → FVG entry on 1m         (retrace into a Fair Value Gap formed after the MSS)
+```
+
+Each step is strictly sequential — no step can fire without all prior steps
+being confirmed.  This is what makes the model fully rule-based and
+back-testable with zero discretion.
+
+## Final Result (locked-in default config)
+
+Dataset: NAS 1m  ·  July 2024 – Oct 2025  ·  Starting equity $10 000  ·  Risk $100/trade (1R)  ·  RR 2.0  ·  Spread+slip 1 pt/side
+
+| Metric            | Value                           |
+| ---               | ---                             |
+| Trades            | 373  (~320/yr,  ~6.2/wk)       |
+| Win rate          | 44.8 %                          |
+| Expectancy        | +0.16 R / trade                 |
+| Profit factor     | 1.25                            |
+| Sharpe (R-based)  | 1.72                            |
+| Net PnL           | +$6 065  (+60.6 %)              |
+| Max drawdown      | −$2 437  (−18.6 %)              |
+| Final equity      | $16 065                         |
+
+### By killzone
+
+| Killzone | Trades | Mean R | Sum R  |
+| ---      | ---:   | ---:   | ---:   |
+| **AM** (09:30–12:00) | **260** | **+0.31** | **+81.1** |
+| PM (13:00–16:00)     | 58  | −0.05 | −2.7 |
+| London (03:00–05:00) | 55  | −0.32 | −17.8 |
+
+The **AM session drives virtually all the edge** — consistent with the
+Silver Bullet findings on 5m data.
+
+## Config choices explained
+
+| Parameter | Value | Why |
+| --- | --- | --- |
+| 4H EMA 20/50 | bias filter | Objective, simple, well-established on HTF |
+| 15m sweep window | 20 bars (5h) | Long enough to capture meaningful swing levels |
+| Sweep max age | 4h | Sweep must be recent to be actionable |
+| MSS lookback | 50 bars | Enough swing history for structure detection |
+| Arm window | 2h | Setup expires if no 1m entry within 2h of MSS |
+| FVG min size | 0.2 × ATR(14) | Noise filter; smaller FVGs fill too easily |
+| Max trades / arm | 1 | Only the first entry per setup |
+| OB entries | off | OB entries are net-negative on this dataset (−0.06R) |
+| Killzones | on | Off-session trades are also net-negative (−0.06R) |
+
+## Honest take
+
+- Edge is **real but modest**: PF 1.25, +0.16R/trade, Sharpe 1.72.
+- **Shorts outperform longs** significantly (+0.39R vs +0.07R) on this
+  dataset — reflecting the July 2024 → Oct 2025 market having sharp
+  sell-offs that fit the bear cascade perfectly.
+- **London session hurts** (−0.32R mean) — either the model isn't tuned
+  for European hours or the NAS liquidity structure is different before
+  NY opens.
+- **14 months of 1m data** is not a large out-of-sample; treat the edge
+  as a hypothesis to verify on additional data.
+- **FVG entries only**: Order Block entries tested negative (−0.06R/trade).
+  The OB candle identification is a simplified proxy; a more granular
+  approach (e.g. institutional OB with breaker confirmation) may help.
+
+## Run it
+
+```bash
+pip install pandas numpy matplotlib pytz
+python3 run_2022_model.py      # 2022 model on 1m data
+python3 run_backtest.py        # Silver Bullet on 5m data (original)
+```
+
+Output lands in `results_2022_model/`.
+
+## Files added
+
+```
+model_2022/
+  __init__.py        package marker
+  data_loader.py     load 1m CSV + resample to any TF
+  ict_primitives.py  Order Block detection + re-export of silver_bullet primitives
+  strategy.py        2022 model state machine (4H→15m→1m cascade)
+  backtest.py        stats + equity / breakdown / monthly-PnL charts
+run_2022_model.py    entry point
+results_2022_model/
+  trades.csv, stats.json, stats_by_killzone.csv, stats_by_entry_type.csv
+  equity_curve.png, breakdown.png, monthly_pnl.png
+```
