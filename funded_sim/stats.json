@@ -1,0 +1,15 @@
+{
+  "total_accounts_bought": 36,
+  "blown_p1": 13,
+  "blown_p2": 10,
+  "blown_funded": 12,
+  "total_blown": 35,
+  "passed_challenge": 12,
+  "total_fees_paid": 19800.0,
+  "total_fees_reimbursed": 7150.0,
+  "total_challenge_bonus": 33662.66,
+  "gross_payouts_extracted": 212925.09,
+  "trader_payouts_received": 191632.58,
+  "total_payouts_count": 32,
+  "net_cash_position": 212645.24
+}
