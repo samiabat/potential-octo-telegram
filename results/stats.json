@@ -1,0 +1,15 @@
+{
+  "trades": 77,
+  "wins": 45,
+  "losses": 32,
+  "win_rate": 58.4416,
+  "expectancy_R": 0.3316,
+  "total_R": 25.5326,
+  "gross_win_$": 4873.4345,
+  "gross_loss_$": 2320.1698,
+  "net_pnl_$": 2553.2646,
+  "profit_factor": 2.1005,
+  "max_dd_$": -1014.7879,
+  "max_dd_%": -7.9268,
+  "final_equity": 12553.2646
+}
