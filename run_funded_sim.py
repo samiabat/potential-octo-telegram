@@ -11,7 +11,7 @@ Prop-firm rules assumed:
   Phase 1 profit target : 8%  = $8,000   |  max DD (trailing) : 8%  = $8,000
   Phase 2 profit target : 5%  = $5,000   |  max DD (trailing) : 5%  = $5,000
   Funded max DD         : 10% = $10,000  (static — floor = $90,000)
-  Daily DD limit        : 5%  = $5,000   (all phases, from SOD equity)
+  Daily DD limit        : $2,000/day     (all phases, from SOD equity)
   Fee reimbursed        : yes, when both challenge phases are passed
   Challenge bonus       : 15% of net challenge P&L (P1+P2), paid on funding
   Profit split          : 90% to trader
@@ -46,7 +46,7 @@ P2_TRAIL_DD       = 5_000       # 5% trailing from peak
 # Funded thresholds
 FUNDED_STATIC_DD  = 10_000      # 10% below $100k → floor = $90k
 FUNDED_FLOOR      = ACCOUNT_SIZE - FUNDED_STATIC_DD   # $90,000
-DAILY_DD_LIMIT    = 5_000       # 5% of $100k, reset each day
+DAILY_DD_LIMIT    = 2_000       # $2,000/day max loss (from SOD equity)
 
 PAYOUT_TRIGGER    = 5_000       # request payout when funded profit ≥ $5,000
 
@@ -298,9 +298,74 @@ total_fees     = total_fees_paid
 total_payouts  = total_payouts_received
 net_cash       = global_equity    # final net position of trader
 
+# ── Bankroll / Runway analysis ─────────────────────────────────────────────────
+# Build the cumulative cash curve, one step per account outcome
+al["net_per_account"] = (
+    al["funded_payouts_gross"] * PROFIT_SPLIT
+    + al["fee_reimbursed"]
+    + al["challenge_bonus"]
+    - al["fee_paid"]
+)
+cum_cash = al["net_per_account"].cumsum().values
+
+# Peak, trough, and drawdown in cumulative cash
+cum_peak = np.maximum.accumulate(cum_cash)
+cash_dd   = cum_cash - cum_peak          # always ≤ 0
+
+max_cash_dd        = float(cash_dd.min())           # worst drawdown (negative)
+max_cash_dd_pct    = (max_cash_dd / cum_peak[np.argmin(cash_dd)]) * 100 if cum_peak[np.argmin(cash_dd)] > 0 else float("nan")
+
+# How many consecutive blown accounts are there at worst?
+consecutive_blown = []
+run = 0
+for _, row in al.iterrows():
+    if row["blown_phase"] in ("p1", "p2"):
+        run += 1
+    else:
+        if run > 0:
+            consecutive_blown.append(run)
+        run = 0
+if run > 0:
+    consecutive_blown.append(run)
+
+max_consec_blown   = max(consecutive_blown) if consecutive_blown else 0
+avg_consec_blown   = float(np.mean(consecutive_blown)) if consecutive_blown else 0.0
+
+# Minimum cash reserve needed = deepest trough of cumulative cash curve
+# (starting from 0, how far in the red did the trader go?)
+min_cum_cash = float(cum_cash.min())
+# "bankroll needed" is how much you must start with so you never go broke
+bankroll_needed = max(0.0, -min_cum_cash)
+
+# How many accounts in a row before first net positive?
+breakeven_idx = next((i for i, v in enumerate(cum_cash) if v > 0), None)
+accts_before_positive = (breakeven_idx + 1) if breakeven_idx is not None else total_accounts
+
+# How long (accounts) did each "negative patch" last?
+neg_patches = []
+neg_start = None
+for i, v in enumerate(cum_cash):
+    if v < 0 and neg_start is None:
+        neg_start = i
+    elif v >= 0 and neg_start is not None:
+        neg_patches.append(i - neg_start)
+        neg_start = None
+if neg_start is not None:
+    neg_patches.append(len(cum_cash) - neg_start)
+
+longest_negative_run = max(neg_patches) if neg_patches else 0
+
+# Rolling worst 10-account window (simulate "I just had a bad streak")
+window = min(10, total_accounts)
+rolling_10 = [sum(al["net_per_account"].iloc[i:i+window]) for i in range(total_accounts - window + 1)]
+worst_10_window = min(rolling_10) if rolling_10 else 0.0
+
+# Fee cost for consecutive blown accounts (e.g. worst streak)
+fee_per_streak = max_consec_blown * CHALLENGE_FEE
+
 print()
 print("=" * 60)
-print("  FUNDED ACCOUNT SIMULATION — RESULTS")
+print("  FUNDED ACCOUNT SIMULATION — RESULTS  (daily DD = $2,000)")
 print("=" * 60)
 print()
 print("── Account Attempts ──────────────────────────────────────")
@@ -326,17 +391,27 @@ if len(pl) > 0:
     print(f"  Largest payout             : ${pl['trader_gets'].max():>10,.2f}")
     print(f"  Smallest payout            : ${pl['trader_gets'].min():>10,.2f}")
 print()
+print("── Bankroll & Runway Analysis ────────────────────────────")
+print(f"  Min cash ever needed       : ${bankroll_needed:>10,.2f}  ← starting capital to never go broke")
+print(f"  Deepest cum. cash drawdown : ${max_cash_dd:>10,.2f}  ({max_cash_dd_pct:.1f}% of peak)" if not np.isnan(max_cash_dd_pct) else f"  Deepest cum. cash drawdown : ${max_cash_dd:>10,.2f}")
+print(f"  Accounts before breakeven  : {accts_before_positive}  (first time cumulative cash went +)")
+print(f"  Longest stretch in red     : {longest_negative_run} consecutive accounts")
+print(f"  Max consecutive blown      : {max_consec_blown}  (cost ${fee_per_streak:,.0f} in fees alone)")
+print(f"  Avg consecutive blown      : {avg_consec_blown:.1f}")
+print(f"  Worst 10-account window    : ${worst_10_window:>10,.2f}  (net over any 10-account stretch)")
+print()
 
 # ── Per-account table ──────────────────────────────────────────────────────────
 summary_cols = ["account","fee_paid","fee_reimbursed","challenge_bonus",
                 "p1_pnl","p2_pnl","funded_gross_pnl","funded_payouts_count",
-                "funded_payouts_gross","blown_phase","reason"]
+                "funded_payouts_gross","net_per_account","blown_phase","reason"]
 al_display = al[summary_cols].copy()
+al_display["cumulative_cash"] = al_display["net_per_account"].cumsum().round(2)
 al_display = al_display.round(2)
 
-print("── Per-Account Detail ────────────────────────────────────")
+print("── Per-Account Detail (with running cumulative cash) ─────")
 pd.set_option("display.max_rows", 200)
-pd.set_option("display.width", 120)
+pd.set_option("display.width", 140)
 pd.set_option("display.float_format", "{:,.2f}".format)
 print(al_display.to_string(index=False))
 
@@ -345,6 +420,7 @@ al.to_csv(RESULTS_DIR / "account_log.csv", index=False)
 pl.to_csv(RESULTS_DIR / "payout_log.csv", index=False)
 
 stats = dict(
+    daily_dd_limit=DAILY_DD_LIMIT,
     total_accounts_bought=int(total_accounts),
     blown_p1=int(blown_p1),
     blown_p2=int(blown_p2),
@@ -358,108 +434,79 @@ stats = dict(
     trader_payouts_received=round(total_payouts_received, 2),
     total_payouts_count=len(pl),
     net_cash_position=round(net_cash, 2),
+    bankroll_min_needed=round(bankroll_needed, 2),
+    deepest_cash_drawdown=round(max_cash_dd, 2),
+    accounts_before_breakeven=int(accts_before_positive),
+    longest_stretch_in_red_accounts=int(longest_negative_run),
+    max_consecutive_blown=int(max_consec_blown),
+    avg_consecutive_blown=round(avg_consec_blown, 1),
+    worst_10_account_window=round(worst_10_window, 2),
 )
 with open(RESULTS_DIR / "stats.json", "w") as f:
     json.dump(stats, f, indent=2)
 
-# ── Equity curve chart ─────────────────────────────────────────────────────────
+# ── Charts ─────────────────────────────────────────────────────────────────────
 if equity_curve:
     ec_df = pd.DataFrame(equity_curve, columns=["account","phase","date","pnl","equity"])
     ec_df["date"] = pd.to_datetime(ec_df["date"])
 
-    # Build a monotonic running equity across all accounts
-    # (cash perspective: track trader's net cash, not account equity)
-    # Re-derive cash flow per trade event
-    cash_events = []
-    running_cash = 0.0
+    fig, axes = plt.subplots(4, 1, figsize=(14, 20))
 
-    for _, row in al.iterrows():
-        running_cash -= CHALLENGE_FEE
-        cash_events.append(running_cash)
-
-    # Simple approach: plot account equity for the longest funded run
-    fig, axes = plt.subplots(3, 1, figsize=(14, 14))
-
-    # Panel 1: Equity within each account attempt (overlay for funded phases)
+    # Panel 1: Account equity curves
     ax = axes[0]
     colors = {"p1": "#aaaaff", "p2": "#ffaaaa", "funded": "#44cc88"}
-    ec_df_funded = ec_df[ec_df["phase"] == "funded"]
     for acct_id, grp in ec_df.groupby("account"):
-        phase_grp = grp[grp["phase"].isin(["p1","p2"])]
-        for ph, sg in phase_grp.groupby("phase"):
-            ax.plot(sg["date"], sg["equity"], lw=0.5, color=colors[ph], alpha=0.4)
-        fgrp = grp[grp["phase"] == "funded"]
-        if not fgrp.empty:
-            ax.plot(fgrp["date"], fgrp["equity"], lw=0.7, color=colors["funded"], alpha=0.6)
+        for ph, sg in grp.groupby("phase"):
+            ax.plot(sg["date"], sg["equity"], lw=0.5 if ph != "funded" else 0.8,
+                    color=colors[ph], alpha=0.4)
     ax.axhline(ACCOUNT_SIZE, color="gray", lw=0.8, ls="--", label="$100k baseline")
-    ax.axhline(FUNDED_FLOOR, color="red", lw=0.8, ls=":", label="Funded floor $90k")
-    ax.set_title("Equity per Account Attempt (blue=P1, red=P2, green=Funded)", fontsize=11)
+    ax.axhline(FUNDED_FLOOR, color="red",  lw=0.8, ls=":", label="Funded floor $90k")
+    ax.set_title("Equity per Account Attempt  (blue=P1, red=P2, green=Funded)", fontsize=11)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
-    # Panel 2: Trader's running net cash position
+    # Panel 2: Net cash P&L per account (bar chart)
     ax2 = axes[1]
-    cash_timeline = []
-    cash = 0.0
-    for _, row in al.iterrows():
-        cash -= row["fee_paid"]
-        cash += row["fee_reimbursed"] + row["challenge_bonus"]
-    # Rebuild per-payout timeline
-    cash2 = 0.0
-    cash_timeline = [(pd.Timestamp("2016-01-01"), 0.0)]
-    acct_fees = al.set_index("account")["fee_paid"]
-    acct_reimb = al.set_index("account")["fee_reimbursed"]
-    acct_bonus = al.set_index("account")["challenge_bonus"]
-
-    # Use payout log dates where possible
-    if len(pl) > 0:
-        pl2 = pl.copy()
-        pl2["trade_date"] = pd.to_datetime(
-            trades.loc[pl2["trade_idx"].clip(0, N-1), "date"].values)
-        for _, p in pl2.iterrows():
-            cash2 += p["trader_gets"]
-            cash_timeline.append((p["trade_date"], cash2))
-    cumcash = [0]
-    for _, row in al.iterrows():
-        cumcash.append(cumcash[-1] - row["fee_paid"] + row["fee_reimbursed"] + row["challenge_bonus"])
-    cumcash_net = []
-    run = 0.0
-    for _, row in al.iterrows():
-        run -= row["fee_paid"]
-        run += row["fee_reimbursed"] + row["challenge_bonus"]
-        cumcash_net.append(run)
-
-    # Simple bar: net cash per account
-    ax2.bar(al["account"], al["funded_payouts_gross"] * PROFIT_SPLIT
-            + al["fee_reimbursed"] + al["challenge_bonus"]
-            - al["fee_paid"],
-            color=["#44cc88" if v >= 0 else "#ee4444"
-                   for v in (al["funded_payouts_gross"] * PROFIT_SPLIT
-                              + al["fee_reimbursed"] + al["challenge_bonus"]
-                              - al["fee_paid"])])
+    net_vals = al["net_per_account"].values
+    bar_colors = ["#44cc88" if v >= 0 else "#ee4444" for v in net_vals]
+    ax2.bar(al["account"], net_vals, color=bar_colors)
     ax2.axhline(0, color="black", lw=0.8)
-    ax2.set_title("Net Cash P&L per Account Attempt", fontsize=11)
+    ax2.set_title("Net Cash P&L per Account Attempt  (green=profit, red=loss)", fontsize=11)
     ax2.set_xlabel("Account #")
     ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
     ax2.grid(True, alpha=0.3, axis="y")
 
-    # Panel 3: Cumulative net cash to trader
+    # Panel 3: Cumulative cash curve + drawdown shading
     ax3 = axes[2]
-    per_acct_net = (al["funded_payouts_gross"] * PROFIT_SPLIT
-                    + al["fee_reimbursed"] + al["challenge_bonus"]
-                    - al["fee_paid"])
-    cum_net = per_acct_net.cumsum().values
-    ax3.plot(range(1, len(cum_net)+1), cum_net, marker="o", ms=4, color="#2255cc", lw=1.5)
-    ax3.fill_between(range(1, len(cum_net)+1), cum_net,
-                     where=[v >= 0 for v in cum_net], alpha=0.15, color="green")
-    ax3.fill_between(range(1, len(cum_net)+1), cum_net,
-                     where=[v < 0 for v in cum_net], alpha=0.15, color="red")
+    x_idx = np.arange(1, len(cum_cash) + 1)
+    ax3.plot(x_idx, cum_cash, marker="o", ms=4, color="#2255cc", lw=1.5, label="Cumulative net cash")
+    ax3.fill_between(x_idx, cum_cash, 0,
+                     where=(cum_cash >= 0), alpha=0.15, color="green", label="In profit")
+    ax3.fill_between(x_idx, cum_cash, 0,
+                     where=(cum_cash < 0), alpha=0.25, color="red", label="In drawdown")
+    # Annotate deepest trough
+    trough_idx = int(np.argmin(cum_cash))
+    ax3.annotate(f"Deepest trough\n${cum_cash[trough_idx]:,.0f}",
+                 xy=(x_idx[trough_idx], cum_cash[trough_idx]),
+                 xytext=(x_idx[trough_idx]+1.5, cum_cash[trough_idx]-500),
+                 fontsize=8, color="darkred",
+                 arrowprops=dict(arrowstyle="->", color="darkred", lw=0.8))
     ax3.axhline(0, color="black", lw=0.8)
+    ax3.axhline(-bankroll_needed, color="orange", lw=1, ls="--",
+                label=f"Min bankroll needed ${bankroll_needed:,.0f}")
     ax3.set_title("Cumulative Net Cash to Trader (across all accounts)", fontsize=11)
     ax3.set_xlabel("Account #")
     ax3.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
-    ax3.grid(True, alpha=0.3)
+    ax3.legend(fontsize=8); ax3.grid(True, alpha=0.3)
+
+    # Panel 4: Cash drawdown curve (how far below peak at each point)
+    ax4 = axes[3]
+    ax4.fill_between(x_idx, cash_dd, 0, alpha=0.4, color="red")
+    ax4.plot(x_idx, cash_dd, color="darkred", lw=1)
+    ax4.set_title("Cumulative Cash Drawdown from Peak (per account)", fontsize=11)
+    ax4.set_xlabel("Account #")
+    ax4.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax4.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(RESULTS_DIR / "funded_sim_overview.png", dpi=130, bbox_inches="tight")
@@ -474,4 +521,5 @@ print("=" * 60)
 print(f"  NET CASH TO TRADER  : ${net_cash:>10,.2f}")
 print(f"  (fees ${total_fees:,.0f} − reimbursed ${total_fees_reimbursed:,.0f} + "
       f"payouts ${total_payouts_received:,.2f} + bonus ${total_challenge_bonus:,.2f})")
+print(f"  MIN BANKROLL NEEDED : ${bankroll_needed:>10,.2f}  (to never run out of cash)")
 print("=" * 60)
