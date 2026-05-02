@@ -23,6 +23,7 @@ from model_2022.backtest import (
     plot_equity,
     plot_breakdown,
     plot_monthly,
+    plot_all_trade_charts,
 )
 
 DATA_PATH   = "1m_data.csv"
@@ -165,6 +166,28 @@ def main() -> None:
 
     print("Done.")
     print(f"\nAll results written to {RESULTS_DIR}/")
+
+    # ------------------------------------------------------------------
+    # Per-trade charts for 2020+ trades (2 charts each in own subfolder)
+    # ------------------------------------------------------------------
+    CHART_START = pd.Timestamp("2020-01-01", tz="America/New_York")
+    trades_2020 = [
+        t for t in trades
+        if t.entry_time >= CHART_START
+    ]
+    if trades_2020:
+        chart_dir = RESULTS_DIR / "trade_charts_2020"
+        print(f"\nGenerating per-trade charts for {len(trades_2020)} "
+              f"2020+ trades → {chart_dir}/")
+        plot_all_trade_charts(
+            trades_2020,
+            df1m,
+            chart_dir,
+            context_bars_before=80,   # ~80 min of 1m context before sweep
+            context_bars_after=20,
+        )
+    else:
+        print("\nNo 2020+ trades found; skipping per-trade chart generation.")
 
 
 if __name__ == "__main__":

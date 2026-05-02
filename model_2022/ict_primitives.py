@@ -122,6 +122,21 @@ def build_event_list(series: pd.Series) -> list[pd.Timestamp]:
     return sorted(series.index[series.astype(bool)].tolist())
 
 
+def build_level_event_list(
+    series_bool: pd.Series,
+    series_level: pd.Series,
+) -> list[tuple[pd.Timestamp, float]]:
+    """Return a sorted list of (timestamp, price_level) for True entries.
+
+    Used to associate a swept price level with each sweep/MSS event so
+    that the strategy can read the exact price level without look-ahead.
+    """
+    idx = series_bool.index[series_bool.astype(bool)]
+    events = [(ts, float(series_level.loc[ts])) for ts in idx
+              if not np.isnan(series_level.loc[ts])]
+    return sorted(events, key=lambda x: x[0])
+
+
 def most_recent_event_before(
     events: list[pd.Timestamp],
     ts: pd.Timestamp,
@@ -136,6 +151,26 @@ def most_recent_event_before(
     candidate = events[idx - 1]
     if ts - candidate <= max_age:
         return candidate
+    return None
+
+
+def most_recent_level_event_before(
+    events: list[tuple[pd.Timestamp, float]],
+    ts: pd.Timestamp,
+    max_age: pd.Timedelta,
+) -> Optional[tuple[pd.Timestamp, float]]:
+    """Like most_recent_event_before but for (timestamp, level) tuples.
+
+    Returns (timestamp, price_level) of the most-recent event strictly
+    before *ts* and within *max_age*, or None.
+    """
+    timestamps = [e[0] for e in events]
+    idx = bisect.bisect_left(timestamps, ts)
+    if idx == 0:
+        return None
+    candidate_ts, candidate_level = events[idx - 1]
+    if ts - candidate_ts <= max_age:
+        return candidate_ts, candidate_level
     return None
 
 

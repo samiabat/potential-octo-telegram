@@ -102,22 +102,36 @@ def detect_mss(df: pd.DataFrame, lookback: int = 50) -> pd.DataFrame:
 def liquidity_sweep(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     """A bar sweeps liquidity if its high exceeds the highest high of the
     prior `window` bars but closes back below it (sell-side sweep above),
-    or its low pierces the lowest low and closes back above (sweep below)."""
+    or its low pierces the lowest low and closes back above (sweep below).
+
+    Two extra columns are added:
+      sweep_high_level : price of the prior-high that was taken out (NaN otherwise)
+      sweep_low_level  : price of the prior-low that was taken out (NaN otherwise)
+    These represent the *horizontal* levels swept by the candle and are used
+    for stop-loss placement and chart annotation.
+    """
     h = df["high"].values
     l = df["low"].values
     c = df["close"].values
-    swept_high = np.zeros(len(df), dtype=bool)
-    swept_low = np.zeros(len(df), dtype=bool)
-    for i in range(window, len(df)):
+    n = len(df)
+    swept_high       = np.zeros(n, dtype=bool)
+    swept_low        = np.zeros(n, dtype=bool)
+    swept_high_level = np.full(n, np.nan)
+    swept_low_level  = np.full(n, np.nan)
+    for i in range(window, n):
         prior_high = h[i - window : i].max()
-        prior_low = l[i - window : i].min()
+        prior_low  = l[i - window : i].min()
         if h[i] > prior_high and c[i] < prior_high:
-            swept_high[i] = True
+            swept_high[i]       = True
+            swept_high_level[i] = prior_high
         if l[i] < prior_low and c[i] > prior_low:
-            swept_low[i] = True
+            swept_low[i]       = True
+            swept_low_level[i] = prior_low
     out = df.copy()
-    out["sweep_high"] = swept_high
-    out["sweep_low"] = swept_low
+    out["sweep_high"]       = swept_high
+    out["sweep_low"]        = swept_low
+    out["sweep_high_level"] = swept_high_level
+    out["sweep_low_level"]  = swept_low_level
     return out
 
 
