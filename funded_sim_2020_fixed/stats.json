@@ -1,0 +1,31 @@
+{
+  "fixed_version": true,
+  "intraday_aware_dd": true,
+  "daily_dd_limit": 5000,
+  "personal_daily_stop": 2000,
+  "total_accounts_bought": 8,
+  "blown_p1": 4,
+  "blown_p2": 3,
+  "blown_funded": 0,
+  "total_blown": 7,
+  "passed_challenge": 0,
+  "total_fees_paid": 4400.0,
+  "total_fees_reimbursed": 0.0,
+  "total_challenge_bonus": 0.0,
+  "gross_payouts_extracted": 0.0,
+  "trader_payouts_received": 0.0,
+  "total_payouts_count": 0,
+  "net_cash_position": -4400.0,
+  "bankroll_min_needed": 4400.0,
+  "deepest_cash_drawdown": -3850.0,
+  "accounts_before_breakeven": 8,
+  "longest_stretch_in_red_accounts": 8,
+  "max_consecutive_blown": 7,
+  "avg_consecutive_blown": 7.0,
+  "worst_10_account_window": -4400.0,
+  "total_days_stopped_by_personal_rule": 24,
+  "blow_up_reasons": {
+    "trail_dd": 7,
+    "trades_exhausted": 1
+  }
+}

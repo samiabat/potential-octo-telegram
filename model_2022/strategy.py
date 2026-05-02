@@ -76,6 +76,11 @@ class Trade:
     entry_type: str = "fvg"  # 'fvg' | 'ob'
     setup_sweep_time: pd.Timestamp | None = None
     setup_mss_time: pd.Timestamp | None = None
+    # Intraday excursion in R-multiples — recorded so the funded-account
+    # simulator can check daily / trailing DD against realistic floating P&L
+    # rather than against realised-only P&L (which understates blow-up risk).
+    mae_r: float = 0.0       # most negative R touched while open  (≤ 0)
+    mfe_r: float = 0.0       # most positive R touched while open  (≥ 0)
 
 
 @dataclass
@@ -233,6 +238,17 @@ def run_2022_model(
             risk = abs(open_trade.entry - open_trade.stop)
             cost_r = (2 * cost_per_side_pts) / risk if risk > 0 else 0.0
 
+            # ── Intraday excursion (in R) on this bar ──────────────────
+            if risk > 0:
+                if open_trade.direction == "long":
+                    bar_low_r  = (l[i] - open_trade.entry) / risk
+                    bar_high_r = (h[i] - open_trade.entry) / risk
+                else:
+                    bar_low_r  = (open_trade.entry - h[i]) / risk
+                    bar_high_r = (open_trade.entry - l[i]) / risk
+                if bar_low_r  < open_trade.mae_r: open_trade.mae_r = bar_low_r
+                if bar_high_r > open_trade.mfe_r: open_trade.mfe_r = bar_high_r
+
             hit_sl = (
                 (open_trade.direction == "long"  and l[i] <= open_trade.stop) or
                 (open_trade.direction == "short" and h[i] >= open_trade.stop)
@@ -242,11 +258,15 @@ def run_2022_model(
                 (open_trade.direction == "short" and l[i] <= open_trade.target)
             )
             if hit_sl:
+                # If a single bar hits both SL and TP we cannot tell which came
+                # first from OHLC alone — assume SL first (conservative).
+                open_trade.mae_r = min(open_trade.mae_r, -1.0)
                 _close_trade(open_trade, ts, open_trade.stop, "loss", -1.0 - cost_r)
                 trades.append(open_trade)
                 open_trade = None
                 open_trade_bars = 0
             elif hit_tp:
+                open_trade.mfe_r = max(open_trade.mfe_r, rr)
                 _close_trade(open_trade, ts, open_trade.target, "win", rr - cost_r)
                 trades.append(open_trade)
                 open_trade = None

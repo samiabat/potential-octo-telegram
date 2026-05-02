@@ -28,7 +28,14 @@ def load_1m(path: str) -> pd.DataFrame:
 
 
 def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample an OHLCV frame to *rule* (e.g. '15min', '4h', '1D')."""
+    """Resample an OHLCV frame to *rule* (e.g. '15min', '4h', '1D').
+
+    Bars are timestamped at the *right* edge — the moment the bar actually
+    closes. A bar covering [T, T+rule) is labelled T+rule. This is what
+    `align_bias_to_ltf` (ffill) needs to avoid look-ahead: at any LTF
+    timestamp t, the most recent HTF bar with index ≤ t is one whose close
+    is already known by t.
+    """
     agg = {
         "open":  "first",
         "high":  "max",
@@ -37,4 +44,4 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         "volume":      "sum",
         "tick_volume": "sum",
     }
-    return df.resample(rule, label="left", closed="left").agg(agg).dropna()
+    return df.resample(rule, label="right", closed="left").agg(agg).dropna()

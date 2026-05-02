@@ -23,6 +23,8 @@ def load_5m(path: str) -> pd.DataFrame:
 
 
 def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    # Right-labelled so the timestamp = moment the bar closes (no look-ahead
+    # when downstream code forward-fills HTF state onto the LTF index).
     agg = {
         "open": "first",
         "high": "max",
@@ -31,5 +33,5 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         "volume": "sum",
         "tick_volume": "sum",
     }
-    out = df.resample(rule, label="left", closed="left").agg(agg).dropna()
+    out = df.resample(rule, label="right", closed="left").agg(agg).dropna()
     return out
