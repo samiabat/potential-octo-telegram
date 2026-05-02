@@ -34,6 +34,12 @@ def trades_to_df(trades: list[Trade]) -> pd.DataFrame:
         "mfe_r":            t.mfe_r,
         "setup_sweep_time": t.setup_sweep_time,
         "setup_mss_time":   t.setup_mss_time,
+        "fvg_top":          t.fvg_top,
+        "fvg_bottom":       t.fvg_bottom,
+        "fvg_time":         t.fvg_time,
+        "ob_high":          t.ob_high,
+        "ob_low":           t.ob_low,
+        "ob_time":          t.ob_time,
     } for t in trades]
     return pd.DataFrame(rows)
 

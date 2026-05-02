@@ -81,6 +81,15 @@ class Trade:
     # rather than against realised-only P&L (which understates blow-up risk).
     mae_r: float = 0.0       # most negative R touched while open  (≤ 0)
     mfe_r: float = 0.0       # most positive R touched while open  (≥ 0)
+    # Entry-zone bounds — populated when the entry fires. Used by the
+    # trade-replay charts to overlay the FVG / Order-Block zone the entry
+    # came from. None for fields that don't apply to a given entry type.
+    fvg_top: float | None = None
+    fvg_bottom: float | None = None
+    fvg_time: pd.Timestamp | None = None   # candle-3 time of the FVG
+    ob_high: float | None = None
+    ob_low: float | None = None
+    ob_time: pd.Timestamp | None = None    # OB-candle time
 
 
 @dataclass
@@ -415,6 +424,8 @@ def run_2022_model(
                                     killzone=kz_label, entry_type="fvg",
                                     setup_sweep_time=arm_sweep_time,
                                     setup_mss_time=arm_mss_time,
+                                    fvg_top=fvg.top, fvg_bottom=fvg.bottom,
+                                    fvg_time=fvg.time,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -435,6 +446,8 @@ def run_2022_model(
                                     killzone=kz_label, entry_type="fvg",
                                     setup_sweep_time=arm_sweep_time,
                                     setup_mss_time=arm_mss_time,
+                                    fvg_top=fvg.top, fvg_bottom=fvg.bottom,
+                                    fvg_time=fvg.time,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -457,6 +470,8 @@ def run_2022_model(
                                     killzone=kz_label, entry_type="ob",
                                     setup_sweep_time=arm_sweep_time,
                                     setup_mss_time=arm_mss_time,
+                                    ob_high=ob.ob_high, ob_low=ob.ob_low,
+                                    ob_time=ob.time,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -477,6 +492,8 @@ def run_2022_model(
                                     killzone=kz_label, entry_type="ob",
                                     setup_sweep_time=arm_sweep_time,
                                     setup_mss_time=arm_mss_time,
+                                    ob_high=ob.ob_high, ob_low=ob.ob_low,
+                                    ob_time=ob.time,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
