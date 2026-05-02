@@ -1,0 +1,29 @@
+{
+  "trades": 573,
+  "wins": 260,
+  "losses": 313,
+  "win_rate_%": 45.3752,
+  "expectancy_R": 0.0824,
+  "total_R": 47.1966,
+  "sharpe_R": 0.8784,
+  "gross_win_$": 44298.3751,
+  "gross_loss_$": 39578.7152,
+  "net_pnl_$": 4719.6599,
+  "profit_factor": 1.1192,
+  "max_dd_$": -2817.9348,
+  "max_dd_%": -28.5043,
+  "final_equity": 14719.6599,
+  "diagnostics": {
+    "total_1m_bars": 3077548,
+    "bars_with_htf_bias": 3077521,
+    "bars_sweep_found": 1247367,
+    "bars_mss_found": 120124,
+    "fvg_candidates": 16125,
+    "ob_candidates": 0,
+    "fvg_blocked_size": 4963,
+    "fvg_no_retrace": 748,
+    "ob_no_retrace": 0,
+    "trades_taken": 573,
+    "setups_expired": 9311
+  }
+}
