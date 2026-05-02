@@ -149,7 +149,7 @@ back-testable with zero discretion.
 
 ## Final Result (locked-in default config)
 
-Dataset: NAS 1m  ·  Jul 2025 – Oct 2025  ·  Starting equity $10 000  ·  Risk $100/trade (1R)  ·  RR 2.0  ·  Spread+slip 1 pt/side
+Dataset: NAS 1m  ·  July 2024 – Oct 2025  ·  Starting equity $10 000  ·  Risk $100/trade (1R)  ·  RR 2.0  ·  Spread+slip 1 pt/side
 
 | Metric            | Value                           |
 | ---               | ---                             |
