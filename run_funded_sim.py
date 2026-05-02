@@ -11,11 +11,16 @@ Prop-firm rules assumed:
   Phase 1 profit target : 8%  = $8,000   |  max DD (trailing) : 8%  = $8,000
   Phase 2 profit target : 5%  = $5,000   |  max DD (trailing) : 5%  = $5,000
   Funded max DD         : 10% = $10,000  (static — floor = $90,000)
-  Daily DD limit        : $2,000/day     (all phases, from SOD equity)
+  Daily DD limit        : 5%  = $5,000   (prop-firm rule — all phases, from SOD equity)
   Fee reimbursed        : yes, when both challenge phases are passed
   Challenge bonus       : 15% of net challenge P&L (P1+P2), paid on funding
   Profit split          : 90% to trader
   Payout trigger        : $5,000 funded profit (equity ≥ $105,000)
+
+Personal risk management:
+  Personal daily stop   : $2,000/day  — trader stops trading for the rest of the day
+                          once the day's loss reaches $2k. The account is NOT blown;
+                          prop-firm daily limit ($5k) is the actual account-killer.
 
 Risk sizing: 1% of $100k = $1,000 per R  (scaled from original $10k backtests)
 """
@@ -46,7 +51,8 @@ P2_TRAIL_DD       = 5_000       # 5% trailing from peak
 # Funded thresholds
 FUNDED_STATIC_DD  = 10_000      # 10% below $100k → floor = $90k
 FUNDED_FLOOR      = ACCOUNT_SIZE - FUNDED_STATIC_DD   # $90,000
-DAILY_DD_LIMIT    = 2_000       # $2,000/day max loss (from SOD equity)
+DAILY_DD_LIMIT       = 5_000       # 5% of $100k — prop-firm rule (account blown if breached)
+PERSONAL_DAILY_STOP  = 2_000       # trader's self-imposed stop: quit the day at -$2k (no blow)
 
 PAYOUT_TRIGGER    = 5_000       # request payout when funded profit ≥ $5,000
 
@@ -68,35 +74,49 @@ print()
 
 # ── Helper — simulate one "phase" from a given trade index ─────────────────────
 def run_phase(trade_idx, start_equity, trail_dd_limit, profit_target,
-              daily_dd_limit=DAILY_DD_LIMIT):
+              daily_dd_limit=DAILY_DD_LIMIT,
+              personal_daily_stop=PERSONAL_DAILY_STOP):
     """
     Simulate one challenge phase (or funded period with profit_target=None).
+
+    Prop-firm blow conditions (account lost):
+      • daily_dd_limit  : day's loss from SOD equity exceeds prop-firm limit ($5k)
+      • trail_dd_limit  : equity drops more than X below trailing peak (challenge phases)
+      • funded floor    : equity falls below $90k (funded phase)
+
+    Personal risk management:
+      • personal_daily_stop : if day's loss reaches this amount ($2k), skip the rest of
+                              today's trades and move to the next trading day (no blow).
 
     Returns dict with keys:
       end_idx       : next trade index after this phase
       end_equity    : final equity
-      blown         : bool — hit a DD limit
+      blown         : bool — hit a prop-firm DD limit (account gone)
       target_hit    : bool — hit the profit target
       trades_log    : list of (date, pnl, equity) tuples
-      daily_blown   : bool — blown by daily DD specifically
+      daily_blown   : bool — blown by the prop-firm daily DD specifically
+      days_stopped  : int  — number of days trading was cut short by personal stop
     """
     equity = start_equity
     peak   = start_equity          # for trailing DD
     blown  = False
-    daily_blown = False
-    target_hit  = False
-    trades_log  = []
+    daily_blown  = False
+    target_hit   = False
+    trades_log   = []
+    days_stopped = 0               # count of days ended early by personal stop
 
     # Group trades by day for daily-DD enforcement
     remaining = trades.iloc[trade_idx:].copy()
     if remaining.empty:
         return dict(end_idx=trade_idx, end_equity=equity, blown=False,
-                    target_hit=False, trades_log=[], daily_blown=False)
+                    target_hit=False, trades_log=[], daily_blown=False,
+                    days_stopped=0)
 
     idx = trade_idx
     for date, day_grp in remaining.groupby("date"):
-        sod_equity = equity          # start-of-day for daily DD check
-        day_blown  = False
+        sod_equity      = equity          # start-of-day for daily DD / personal stop
+        day_blown       = False
+        day_personally_stopped = False
 
         for row_idx in day_grp.index:
             row = trades.loc[row_idx]
@@ -106,33 +126,44 @@ def run_phase(trade_idx, start_equity, trail_dd_limit, profit_target,
             idx += 1
             trades_log.append((date, pnl, equity))
 
-            # ── Daily DD check ─────────────────────────────────────
-            if sod_equity - equity > daily_dd_limit:
+            day_loss = sod_equity - equity   # positive = loss on the day
+
+            # ── Prop-firm daily DD check (account blown) ────────────
+            if day_loss >= daily_dd_limit:
                 blown = True; daily_blown = True; day_blown = True
                 break
 
-            # ── Phase DD check (trailing from peak) ────────────────
+            # ── Phase DD check (trailing from peak) ─────────────────
             if trail_dd_limit is not None:
                 if peak - equity > trail_dd_limit:
                     blown = True; day_blown = True
                     break
 
-            # ── Funded static floor check ───────────────────────────
+            # ── Funded static floor check ────────────────────────────
             if trail_dd_limit is None:          # funded — static floor
                 if equity < FUNDED_FLOOR:
                     blown = True; day_blown = True
                     break
 
+            # ── Personal daily stop (not a blow — just done for today)
+            if personal_daily_stop is not None and day_loss >= personal_daily_stop:
+                day_personally_stopped = True
+                break
+
         if day_blown or blown:
             break
 
-        # ── End-of-day profit target check ─────────────────────────
+        if day_personally_stopped:
+            days_stopped += 1
+            # continue to next day — account still live
+
+        # ── End-of-day profit target check ──────────────────────────
         if profit_target is not None:
             if equity - ACCOUNT_SIZE >= profit_target:
                 target_hit = True
                 break
 
-        # ── Funded payout check (end of day) ───────────────────────
+        # ── Funded payout check (end of day) ─────────────────────────
         if profit_target is None:
             if equity - ACCOUNT_SIZE >= PAYOUT_TRIGGER:
                 target_hit = True   # signals "payout ready"
@@ -140,7 +171,7 @@ def run_phase(trade_idx, start_equity, trail_dd_limit, profit_target,
 
     return dict(end_idx=idx, end_equity=equity, blown=blown,
                 target_hit=target_hit, trades_log=trades_log,
-                daily_blown=daily_blown)
+                daily_blown=daily_blown, days_stopped=days_stopped)
 
 
 # ── Main simulation ────────────────────────────────────────────────────────────
@@ -174,6 +205,7 @@ while trade_idx < N:
         challenge_bonus=0.0, fee_reimbursed=0.0,
         blown_phase=None, reason=None,
         p1_trades=0, p2_trades=0, funded_trades=0,
+        days_stopped=0,    # total days cut short by personal $2k stop
     )
     total_fees_paid += CHALLENGE_FEE
     global_equity   -= CHALLENGE_FEE
@@ -182,6 +214,7 @@ while trade_idx < N:
     res1 = run_phase(trade_idx, ACCOUNT_SIZE, P1_TRAIL_DD, P1_PROFIT_TARGET)
     entry["p1_pnl"]    = res1["end_equity"] - ACCOUNT_SIZE
     entry["p1_trades"] = res1["end_idx"] - trade_idx
+    entry["days_stopped"] += res1["days_stopped"]
     for date, pnl, eq in res1["trades_log"]:
         equity_curve.append((account_num, "p1", date, pnl, eq))
     trade_idx = res1["end_idx"]
@@ -201,6 +234,7 @@ while trade_idx < N:
     res2 = run_phase(trade_idx, ACCOUNT_SIZE, P2_TRAIL_DD, P2_PROFIT_TARGET)
     entry["p2_pnl"]    = res2["end_equity"] - ACCOUNT_SIZE
     entry["p2_trades"] = res2["end_idx"] - trade_idx
+    entry["days_stopped"] += res2["days_stopped"]
     for date, pnl, eq in res2["trades_log"]:
         equity_curve.append((account_num, "p2", date, pnl, eq))
     trade_idx = res2["end_idx"]
@@ -235,7 +269,8 @@ while trade_idx < N:
         res_f = run_phase(trade_idx, funded_equity, None, None)
         for date, pnl, eq in res_f["trades_log"]:
             equity_curve.append((account_num, "funded", date, pnl, eq))
-        entry["funded_trades"] += res_f["end_idx"] - trade_idx
+        entry["funded_trades"]  += res_f["end_idx"] - trade_idx
+        entry["days_stopped"]   += res_f["days_stopped"]
         trade_idx  = res_f["end_idx"]
         funded_equity = res_f["end_equity"]
 
@@ -297,6 +332,7 @@ total_accounts = len(al)
 total_fees     = total_fees_paid
 total_payouts  = total_payouts_received
 net_cash       = global_equity    # final net position of trader
+total_days_stopped = int(al["days_stopped"].sum())   # days cut short by personal stop
 
 # ── Bankroll / Runway analysis ─────────────────────────────────────────────────
 # Build the cumulative cash curve, one step per account outcome
@@ -365,7 +401,8 @@ fee_per_streak = max_consec_blown * CHALLENGE_FEE
 
 print()
 print("=" * 60)
-print("  FUNDED ACCOUNT SIMULATION — RESULTS  (daily DD = $2,000)")
+print(f"  FUNDED ACCOUNT SIMULATION — RESULTS")
+print(f"  Prop-firm daily DD : $5,000  |  Personal daily stop : $2,000")
 print("=" * 60)
 print()
 print("── Account Attempts ──────────────────────────────────────")
@@ -399,6 +436,7 @@ print(f"  Longest stretch in red     : {longest_negative_run} consecutive accoun
 print(f"  Max consecutive blown      : {max_consec_blown}  (cost ${fee_per_streak:,.0f} in fees alone)")
 print(f"  Avg consecutive blown      : {avg_consec_blown:.1f}")
 print(f"  Worst 10-account window    : ${worst_10_window:>10,.2f}  (net over any 10-account stretch)")
+print(f"  Days stopped by $2k rule   : {total_days_stopped}  (trading halted early, account kept)")
 print()
 
 # ── Per-account table ──────────────────────────────────────────────────────────
@@ -420,7 +458,8 @@ al.to_csv(RESULTS_DIR / "account_log.csv", index=False)
 pl.to_csv(RESULTS_DIR / "payout_log.csv", index=False)
 
 stats = dict(
-    daily_dd_limit=DAILY_DD_LIMIT,
+    prop_firm_daily_dd_limit=DAILY_DD_LIMIT,
+    personal_daily_stop=PERSONAL_DAILY_STOP,
     total_accounts_bought=int(total_accounts),
     blown_p1=int(blown_p1),
     blown_p2=int(blown_p2),
@@ -441,6 +480,7 @@ stats = dict(
     max_consecutive_blown=int(max_consec_blown),
     avg_consecutive_blown=round(avg_consec_blown, 1),
     worst_10_account_window=round(worst_10_window, 2),
+    total_days_stopped_by_personal_rule=int(total_days_stopped),
 )
 with open(RESULTS_DIR / "stats.json", "w") as f:
     json.dump(stats, f, indent=2)
