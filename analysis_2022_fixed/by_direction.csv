@@ -1,0 +1,3 @@
+direction,trades,wins,losses,win_rate_pct,mean_R,total_R,net_pnl
+long,165,69,96,41.8,0.025,4.123,412.29
+short,103,42,61,40.8,0.053,5.506,550.59
