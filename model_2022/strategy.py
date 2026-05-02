@@ -164,24 +164,42 @@ def run_2022_model(
 
     # ------------------------------------------------------------------
     # 2. HTF bias on 4H (EMA cross: +1 bull, -1 bear, 0 flat)
+    #
+    # Leak-free: the EMA of a 4H bar uses that bar's *close*, which is
+    # only known when the bar finishes.  We shift by 1 bar so the bias
+    # becomes visible to the 1m walk only from the *next* 4H bar's open
+    # (i.e. after the bar that computed it has actually closed).
     # ------------------------------------------------------------------
     bias_4h = htf_bias(df4h, ema_fast=ema_fast, ema_slow=ema_slow)
+    bias_4h = bias_4h.shift(1).fillna(0).astype(int)   # no look-ahead
     bias_1m = align_bias_to_ltf(bias_4h, df1m.index)
 
     # ------------------------------------------------------------------
     # 3. 15m liquidity sweep events
+    #
+    # Leak-free: sweep detection uses the bar's *high* AND *close*, so
+    # the signal is only known after the 15m bar closes.  Shifting by 1
+    # moves each event to the *next* 15m bar's timestamp, which is the
+    # earliest moment the signal is actually observable.
     # ------------------------------------------------------------------
     df15m_sw = liquidity_sweep(df15m, window=sweep_window_15m)
-    sweep_low_events  = build_event_list(df15m_sw["sweep_low"])   # bull setup
-    sweep_high_events = build_event_list(df15m_sw["sweep_high"])  # bear setup
+    sweep_low_events  = build_event_list(
+        df15m_sw["sweep_low"].shift(1).fillna(False))   # bull setup
+    sweep_high_events = build_event_list(
+        df15m_sw["sweep_high"].shift(1).fillna(False))  # bear setup
 
     # ------------------------------------------------------------------
     # 4. 15m MSS events (computed on sweep-annotated frame so the same
     #    copy of the frame is used; MSS logic only reads OHLC)
+    #
+    # Leak-free: MSS uses close-of-bar data on the 15m frame; shift by 1
+    # so events are only visible after the bar that generated them closes.
     # ------------------------------------------------------------------
     df15m_mss = detect_mss(df15m_sw, lookback=mss_lookback_15m)
-    mss_up_events = build_event_list(df15m_mss["mss_up"])   # bull MSS (CHoCH up)
-    mss_dn_events = build_event_list(df15m_mss["mss_dn"])   # bear MSS (CHoCH dn)
+    mss_up_events = build_event_list(
+        df15m_mss["mss_up"].shift(1).fillna(False))   # bull MSS (CHoCH up)
+    mss_dn_events = build_event_list(
+        df15m_mss["mss_dn"].shift(1).fillna(False))   # bear MSS (CHoCH dn)
 
     # ------------------------------------------------------------------
     # 5. 1m FVGs and Order Blocks (full pre-computation, index lookup)
