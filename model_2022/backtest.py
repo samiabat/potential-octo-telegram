@@ -40,6 +40,8 @@ def trades_to_df(trades: list[Trade]) -> pd.DataFrame:
         "ob_high":          t.ob_high,
         "ob_low":           t.ob_low,
         "ob_time":          t.ob_time,
+        "sweep_level":      t.sweep_level,
+        "sweep_extreme":    t.sweep_extreme,
     } for t in trades]
     return pd.DataFrame(rows)
 

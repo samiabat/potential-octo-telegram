@@ -90,6 +90,13 @@ class Trade:
     ob_high: float | None = None
     ob_low: float | None = None
     ob_time: pd.Timestamp | None = None    # OB-candle time
+    # Sweep info — the liquidity that was raided (the prior swing) and the
+    # deepest pierce of that level by the sweep bar itself. The stop is
+    # placed just beyond `sweep_extreme` (the deepest pierce), per ICT-2022
+    # methodology: "stops below the sweep". `sweep_level` is the line you'd
+    # draw on the 15m chart as the liquidity pool that was taken.
+    sweep_level: float | None = None
+    sweep_extreme: float | None = None
 
 
 @dataclass
@@ -189,6 +196,13 @@ def run_2022_model(
     sweep_low_events  = build_event_list(df15m_sw["sweep_low"])   # bull setup
     sweep_high_events = build_event_list(df15m_sw["sweep_high"])  # bear setup
 
+    # Lookup tables keyed by 15m bar timestamp so we can recover the
+    # raided level and the deepest-pierce price for any sweep event.
+    sweep_low_level_by_ts    = df15m_sw["sweep_low_level"].dropna().to_dict()
+    sweep_low_extreme_by_ts  = df15m_sw["sweep_low_extreme"].dropna().to_dict()
+    sweep_high_level_by_ts   = df15m_sw["sweep_high_level"].dropna().to_dict()
+    sweep_high_extreme_by_ts = df15m_sw["sweep_high_extreme"].dropna().to_dict()
+
     # ------------------------------------------------------------------
     # 4. 15m MSS events (computed on sweep-annotated frame so the same
     #    copy of the frame is used; MSS logic only reads OHLC)
@@ -230,6 +244,8 @@ def run_2022_model(
     arm_expires: pd.Timestamp | None = None
     arm_sweep_time: pd.Timestamp | None = None
     arm_mss_time: pd.Timestamp | None = None
+    arm_sweep_level: float | None = None    # the raided liquidity level
+    arm_sweep_extreme: float | None = None  # deepest pierce of that level
     arm_trades: int = 0                  # trades taken in current arm
 
     # Pending 1m entries (FVGs / OBs waiting for a retrace)
@@ -308,6 +324,8 @@ def run_2022_model(
                         arm_expires = mss + arm_window
                         arm_sweep_time = sw
                         arm_mss_time = mss
+                        arm_sweep_level   = sweep_low_level_by_ts.get(sw)
+                        arm_sweep_extreme = sweep_low_extreme_by_ts.get(sw)
                         arm_trades = 0
                         pending = []   # reset pending from old arm
 
@@ -323,6 +341,8 @@ def run_2022_model(
                         arm_expires = mss + arm_window
                         arm_sweep_time = sw
                         arm_mss_time = mss
+                        arm_sweep_level   = sweep_high_level_by_ts.get(sw)
+                        arm_sweep_extreme = sweep_high_extreme_by_ts.get(sw)
                         arm_trades = 0
                         pending = []
 
@@ -408,11 +428,19 @@ def run_2022_model(
 
                     entry_taken = False
 
+                    # ── SL anchor (ICT 2022): below the sweep extreme for
+                    # longs, above the sweep extreme for shorts. We add a
+                    # small ATR pad so noise doesn't pick the stop off, and
+                    # enforce a minimum stop distance (`min_stop`) as a floor.
+                    sweep_pad = 0.1 * atr
                     if p["type"] == "fvg" and open_trade is None:
                         fvg = p["fvg"]
                         if p["dir"] == "long" and l[i] <= fvg.top and h[i] >= fvg.bottom:
                             entry_px = min(c[i], fvg.top)
-                            stop_px  = fvg.bottom - 0.1 * atr
+                            if arm_sweep_extreme is not None:
+                                stop_px = arm_sweep_extreme - sweep_pad
+                            else:
+                                stop_px = fvg.bottom - sweep_pad
                             if entry_px - stop_px < min_stop:
                                 stop_px = entry_px - min_stop
                             risk = entry_px - stop_px
@@ -426,6 +454,8 @@ def run_2022_model(
                                     setup_mss_time=arm_mss_time,
                                     fvg_top=fvg.top, fvg_bottom=fvg.bottom,
                                     fvg_time=fvg.time,
+                                    sweep_level=arm_sweep_level,
+                                    sweep_extreme=arm_sweep_extreme,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -434,7 +464,10 @@ def run_2022_model(
 
                         elif p["dir"] == "short" and h[i] >= fvg.bottom and l[i] <= fvg.top:
                             entry_px = max(c[i], fvg.bottom)
-                            stop_px  = fvg.top + 0.1 * atr
+                            if arm_sweep_extreme is not None:
+                                stop_px = arm_sweep_extreme + sweep_pad
+                            else:
+                                stop_px = fvg.top + sweep_pad
                             if stop_px - entry_px < min_stop:
                                 stop_px = entry_px + min_stop
                             risk = stop_px - entry_px
@@ -448,6 +481,8 @@ def run_2022_model(
                                     setup_mss_time=arm_mss_time,
                                     fvg_top=fvg.top, fvg_bottom=fvg.bottom,
                                     fvg_time=fvg.time,
+                                    sweep_level=arm_sweep_level,
+                                    sweep_extreme=arm_sweep_extreme,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -458,7 +493,10 @@ def run_2022_model(
                         ob = p["ob"]
                         if p["dir"] == "long" and l[i] <= ob.ob_high and h[i] >= ob.ob_low:
                             entry_px = min(c[i], ob.ob_high)
-                            stop_px  = ob.ob_low - 0.1 * atr
+                            if arm_sweep_extreme is not None:
+                                stop_px = arm_sweep_extreme - sweep_pad
+                            else:
+                                stop_px = ob.ob_low - sweep_pad
                             if entry_px - stop_px < min_stop:
                                 stop_px = entry_px - min_stop
                             risk = entry_px - stop_px
@@ -472,6 +510,8 @@ def run_2022_model(
                                     setup_mss_time=arm_mss_time,
                                     ob_high=ob.ob_high, ob_low=ob.ob_low,
                                     ob_time=ob.time,
+                                    sweep_level=arm_sweep_level,
+                                    sweep_extreme=arm_sweep_extreme,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -480,7 +520,10 @@ def run_2022_model(
 
                         elif p["dir"] == "short" and h[i] >= ob.ob_low and l[i] <= ob.ob_high:
                             entry_px = max(c[i], ob.ob_low)
-                            stop_px  = ob.ob_high + 0.1 * atr
+                            if arm_sweep_extreme is not None:
+                                stop_px = arm_sweep_extreme + sweep_pad
+                            else:
+                                stop_px = ob.ob_high + sweep_pad
                             if stop_px - entry_px < min_stop:
                                 stop_px = entry_px + min_stop
                             risk = stop_px - entry_px
@@ -494,6 +537,8 @@ def run_2022_model(
                                     setup_mss_time=arm_mss_time,
                                     ob_high=ob.ob_high, ob_low=ob.ob_low,
                                     ob_time=ob.time,
+                                    sweep_level=arm_sweep_level,
+                                    sweep_extreme=arm_sweep_extreme,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
