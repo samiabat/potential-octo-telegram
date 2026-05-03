@@ -1,8 +1,0 @@
-config,trades,tr/yr,win_%,exp_R,PF,totR,MDD_%,fin_$
-"A baseline (no bias, 1st-half, size 0.3)",1232,229.9,48.6,0.082,1.19,100.8,-13.3,20084.0
-B strict bias,676,126.4,47.3,0.059,1.13,39.9,-13.9,13993.0
-C bias + sweep gate,41,7.8,34.1,-0.174,0.72,-7.1,-11.2,9285.0
-D bias + sweep + MSS (purist),4,1.5,25.0,-0.762,0.1,-3.0,-3.4,9695.0
-E bias + larger FVG (0.6 ATR),354,66.5,46.9,0.045,1.1,15.8,-21.5,11575.0
-F bias + full hour entries,1447,270.1,46.6,0.032,1.07,46.0,-17.0,14597.0
-G bias + sweep + larger FVG,27,5.7,37.0,-0.134,0.75,-3.6,-7.9,9637.0
