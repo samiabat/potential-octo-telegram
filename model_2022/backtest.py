@@ -35,6 +35,8 @@ def trades_to_df(trades: list[Trade]) -> pd.DataFrame:
         "sweep_level":      t.sweep_level,
         "fvg_top":          t.fvg_top,
         "fvg_bottom":       t.fvg_bottom,
+        "fvg_time":         t.fvg_time,
+        "setup_mss_tf":     t.setup_mss_tf,
     } for t in trades]
     return pd.DataFrame(rows)
 
@@ -337,27 +339,79 @@ def _draw_candles(ax: plt.Axes, df: pd.DataFrame) -> None:
     ax.set_xlim(-1, n)
 
 
+def _add_clean_levels(
+    ax: plt.Axes,
+    chart_df: pd.DataFrame,
+    trade: "Trade",
+    *,
+    draw_fvg_box: bool = True,
+) -> None:
+    """Add only the essential ICT levels to an axis (thin lines, no vertical markers).
+
+    Draws:
+      - Purple dashed horizontal: 15m sweep level (liquidity taken)
+      - Gold filled rectangle: FVG box from formation bar to entry bar
+      - Blue thin line: entry price
+      - Red thin line: stop-loss
+      - Green thin line: take-profit
+
+    No vertical lines, no shading, no background decorations.
+    """
+    n = len(chart_df)
+    lw = 0.6   # universal thin linewidth for all price-level lines
+
+    # ── Liquidity sweep level (horizontal) ──────────────────────────────────
+    if trade.sweep_level is not None:
+        ax.axhline(trade.sweep_level, color="mediumpurple", linewidth=lw,
+                   linestyle="--", alpha=0.9, zorder=5,
+                   label=f"Liquidity  {trade.sweep_level:.1f}")
+
+    # ── FVG rectangle (from formation to entry, not full width) ─────────────
+    if draw_fvg_box and trade.fvg_top is not None and trade.fvg_bottom is not None:
+        # x_start = bar closest to FVG formation time; x_end = entry bar
+        fvg_t = trade.fvg_time if trade.fvg_time is not None else trade.setup_mss_time
+        entry_t = trade.entry_time
+
+        def _xpos(ts):
+            if ts is None:
+                return None
+            pos = chart_df.index.searchsorted(ts)
+            return int(min(pos, n - 1))
+
+        x0 = _xpos(fvg_t)
+        x1 = _xpos(entry_t)
+        if x0 is not None and x1 is not None and x1 >= x0:
+            fvg_rect = mpatches.Rectangle(
+                (x0 - 0.3, trade.fvg_bottom),
+                (x1 - x0 + 0.6),
+                trade.fvg_top - trade.fvg_bottom,
+                linewidth=0.5,
+                edgecolor="goldenrod",
+                facecolor="gold",
+                alpha=0.25,
+                zorder=4,
+                label=f"FVG  {trade.fvg_bottom:.1f}–{trade.fvg_top:.1f}",
+            )
+            ax.add_patch(fvg_rect)
+
+    # ── Entry / SL / TP ─────────────────────────────────────────────────────
+    ax.axhline(trade.entry,  color="dodgerblue", linewidth=lw,
+               linestyle="-",  zorder=6, label=f"Entry  {trade.entry:.1f}")
+    ax.axhline(trade.stop,   color="crimson",    linewidth=lw,
+               linestyle="-",  zorder=6, label=f"SL  {trade.stop:.1f}")
+    ax.axhline(trade.target, color="#00cc44",    linewidth=lw,
+               linestyle="-",  zorder=6, label=f"TP  {trade.target:.1f}")
+
+
 def plot_trade_chart(
-    trade: Trade,
+    trade: "Trade",
     df1m: pd.DataFrame,
     out_path: str,
     trade_num: int = 0,
-    context_bars_before: int = 60,   # 1m bars before sweep (context)
-    context_bars_after: int = 15,    # 1m bars after exit (breathing room)
+    context_bars_before: int = 80,   # 1m bars before sweep
+    context_bars_after: int = 20,    # 1m bars after exit
 ) -> None:
-    """Draw a 1m candlestick chart for a single trade.
-
-    The chart shows:
-      - Price action from *context_bars_before* bars before the sweep event
-        through *context_bars_after* bars after exit
-      - HORIZONTAL dashed purple line: the 15m sweep level (the prior swing
-        price that was taken out) — this is the ICT liquidity sweep level
-      - HORIZONTAL shaded band: FVG zone (fvg_bottom → fvg_top)
-      - HORIZONTAL lines: entry (blue), stop (red), target (green)
-      - VERTICAL markers (faint, for time reference only):
-          sweep (purple), MSS (orange), entry (blue), exit (grey)
-      - Shaded trade duration zone (green=win, red=loss, gold=expired)
-    """
+    """1m entry chart: clean candles + horizontal levels only."""
     sweep_ts = trade.setup_sweep_time
     entry_ts = trade.entry_time
     exit_ts  = trade.exit_time if trade.exit_time is not None else entry_ts
@@ -365,293 +419,195 @@ def plot_trade_chart(
 
     idx_arr = df1m.index
 
-    def _find_pos(ts: pd.Timestamp | None, fallback: int = 0) -> int:
+    def _find_pos(ts, fallback=0):
         if ts is None:
             return fallback
-        pos = idx_arr.searchsorted(ts)
-        return int(min(pos, len(idx_arr) - 1))
+        return int(min(idx_arr.searchsorted(ts), len(idx_arr) - 1))
 
-    anchor_pos = _find_pos(anchor_ts)
-    exit_pos   = _find_pos(exit_ts)
-
-    start_pos = max(0, anchor_pos - context_bars_before)
-    end_pos   = min(len(idx_arr) - 1, exit_pos + context_bars_after)
-
-    chart_df = df1m.iloc[start_pos : end_pos + 1].copy()
+    start_pos = max(0, _find_pos(anchor_ts) - context_bars_before)
+    end_pos   = min(len(idx_arr) - 1, _find_pos(exit_ts) + context_bars_after)
+    chart_df  = df1m.iloc[start_pos : end_pos + 1].copy()
     if chart_df.empty:
         return
 
     n = len(chart_df)
-
-    def _x(ts: pd.Timestamp | None) -> float | None:
-        if ts is None:
-            return None
-        pos = chart_df.index.searchsorted(ts)
-        return float(min(pos, n - 1))
-
-    x_sweep = _x(sweep_ts)
-    x_mss   = _x(trade.setup_mss_time)
-    x_entry = _x(entry_ts)
-    x_exit  = _x(exit_ts)
-
-    fig, ax = plt.subplots(figsize=(16, 7))
+    fig, ax = plt.subplots(figsize=(18, 6))
     _draw_candles(ax, chart_df)
+    _add_clean_levels(ax, chart_df, trade, draw_fvg_box=True)
 
-    # ── Horizontal price levels ──────────────────────────────────────────────
+    tick_step = max(1, n // 14)
+    tpos = list(range(0, n, tick_step))
+    ax.set_xticks(tpos)
+    ax.set_xticklabels(
+        [chart_df.index[p].strftime("%m/%d %H:%M") for p in tpos],
+        rotation=30, ha="right", fontsize=7,
+    )
 
-    # Sweep level: the 15m swing price that was taken out — the key ICT level
-    if trade.sweep_level is not None:
-        ax.axhline(trade.sweep_level, color="mediumpurple", linewidth=1.8,
-                   linestyle="--", alpha=0.9,
-                   label=f"15m Sweep Level  {trade.sweep_level:.1f}", zorder=5)
-
-    # FVG zone: shaded horizontal band
-    if trade.fvg_top is not None and trade.fvg_bottom is not None:
-        ax.axhspan(trade.fvg_bottom, trade.fvg_top,
-                   alpha=0.15, color="gold", zorder=2,
-                   label=f"FVG  {trade.fvg_bottom:.1f}–{trade.fvg_top:.1f}")
-
-    ax.axhline(trade.entry,  color="dodgerblue", linewidth=1.8,
-               linestyle="--", label=f"Entry  {trade.entry:.1f}", zorder=6)
-    ax.axhline(trade.stop,   color="crimson",    linewidth=1.8,
-               linestyle=":",  label=f"Stop   {trade.stop:.1f}",  zorder=6)
-    ax.axhline(trade.target, color="limegreen",  linewidth=1.8,
-               linestyle="-.", label=f"Target {trade.target:.1f}", zorder=6)
-
-    # ── Vertical time-reference markers (faint) ──────────────────────────────
-    if x_sweep is not None:
-        ax.axvline(x_sweep, color="mediumpurple", linewidth=0.8,
-                   linestyle=":", alpha=0.5, label="Sweep time (15m bar open)")
-    if x_mss is not None:
-        ax.axvline(x_mss, color="darkorange", linewidth=0.8,
-                   linestyle=":", alpha=0.5, label="MSS time (15m)")
-    if x_entry is not None:
-        ax.axvline(x_entry, color="dodgerblue", linewidth=1.2,
-                   linestyle="-", alpha=0.6, label="Entry bar (1m)")
-    if x_exit is not None:
-        ax.axvline(x_exit, color="gray", linewidth=0.8,
-                   linestyle=":", alpha=0.5, label="Exit bar (1m)")
-
-    # ── Trade duration shading ───────────────────────────────────────────────
-    if x_entry is not None and x_exit is not None:
-        shade_color = (
-            "limegreen" if trade.outcome == "win"
-            else "crimson" if trade.outcome == "loss"
-            else "gold"
-        )
-        ax.axvspan(x_entry, max(x_exit, x_entry + 0.5),
-                   alpha=0.08, color=shade_color, zorder=1)
-
-    # ── X-axis labels ────────────────────────────────────────────────────────
-    tick_step = max(1, n // 12)
-    tick_positions = list(range(0, n, tick_step))
-    tick_labels = [chart_df.index[p].strftime("%m/%d %H:%M") for p in tick_positions]
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=8)
-
-    # ── Title ────────────────────────────────────────────────────────────────
     outcome_str = (trade.outcome or "open").upper()
-    r_str = f"{trade.r_multiple:+.2f}R"
-    direction_icon = "▲ LONG" if trade.direction == "long" else "▼ SHORT"
     title_color = (
         "darkgreen" if trade.outcome == "win"
-        else "darkred" if trade.outcome == "loss"
-        else "goldenrod"
+        else "darkred" if trade.outcome == "loss" else "goldenrod"
     )
     ax.set_title(
-        f"Trade #{trade_num:03d}  |  {direction_icon}  |  {trade.killzone.upper()}  "
-        f"|  {outcome_str}  {r_str}\n"
-        f"1m Entry Chart  —  "
-        f"Entry: {entry_ts.strftime('%Y-%m-%d %H:%M')}  →  "
-        f"Exit: {exit_ts.strftime('%H:%M') if exit_ts else '—'}  "
-        f"|  Type: {trade.entry_type.upper()}"
-        + (f"  |  SL below sweep @ {trade.sweep_level:.1f}" if trade.sweep_level else ""),
-        fontsize=10, fontweight="bold", color=title_color,
+        f"#{trade_num:03d} {'▲' if trade.direction == 'long' else '▼'}"
+        f"  {trade.killzone.upper()}  {outcome_str}  {trade.r_multiple:+.2f}R"
+        f"  |  1m  |  {entry_ts.strftime('%Y-%m-%d %H:%M')}",
+        fontsize=9, fontweight="bold", color=title_color,
     )
-    ax.set_ylabel("Price (NAS pts)")
-    ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
-    ax.grid(alpha=0.2)
+    ax.set_ylabel("Price", fontsize=8)
+    ax.legend(loc="upper left", fontsize=7, framealpha=0.7, handlelength=1.5)
+    ax.grid(alpha=0.15)
 
-    price_range = chart_df["high"].max() - chart_df["low"].min()
-    margin = price_range * 0.08
+    pr = chart_df["high"].max() - chart_df["low"].min()
+    margin = max(pr * 0.06, 2.0)
     ax.set_ylim(chart_df["low"].min() - margin, chart_df["high"].max() + margin)
-
     plt.tight_layout()
-    plt.savefig(out_path, dpi=110)
+    plt.savefig(out_path, dpi=120)
     plt.close(fig)
 
 
-def plot_trade_chart_15m(
-    trade: Trade,
+def _plot_trade_tf_chart(
+    trade: "Trade",
     df1m: pd.DataFrame,
+    tf: str,
     out_path: str,
     trade_num: int = 0,
-    context_15m_before: int = 12,   # 15m bars before sweep (3 hours)
-    context_15m_after: int = 4,     # 15m bars after entry (1 hour)
+    context_bars_before: int = 80,
+    context_bars_after: int = 6,
 ) -> None:
-    """Draw a 15m candlestick context chart for a single trade.
+    """Generic TF context chart (15m or 5m).
 
-    The chart shows:
-      - 15m OHLC candles covering the full setup context
-      - HORIZONTAL dashed purple line: the swept swing-low/high price level
-        (the liquidity pool that was targeted — the key ICT level)
-      - FVG zone as a horizontal shaded band (price range of the 1m FVG,
-        projected across the chart for reference)
-      - HORIZONTAL lines: entry (blue), stop (red), target (green)
-      - VERTICAL markers: sweep bar (purple), MSS bar (orange), entry time (blue)
+    Shows 80 bars before the sweep and 6 bars after entry on the given
+    timeframe, with clean horizontal levels only (no vertical lines).
     """
     from .data_loader import resample as _resample
-    df15m = _resample(df1m, "15min")
-    if df15m.empty:
+    df_tf = _resample(df1m, tf)
+    if df_tf.empty:
         return
 
     sweep_ts = trade.setup_sweep_time
     entry_ts = trade.entry_time
-    exit_ts  = trade.exit_time if trade.exit_time is not None else entry_ts
     anchor_ts = sweep_ts if sweep_ts is not None else entry_ts
 
-    idx_arr = df15m.index
+    idx_arr = df_tf.index
 
-    def _find_pos_15m(ts: pd.Timestamp | None, fallback: int = 0) -> int:
+    def _fp(ts, fallback=0):
         if ts is None:
             return fallback
-        pos = idx_arr.searchsorted(ts)
-        return int(min(pos, len(idx_arr) - 1))
+        return int(min(idx_arr.searchsorted(ts), len(idx_arr) - 1))
 
-    # The sweep event timestamp (after shift) is the bar AFTER the actual sweep candle.
-    # So the actual sweep candle is 1 bar earlier on the 15m chart.
-    anchor_pos = max(0, _find_pos_15m(anchor_ts) - 1)   # actual sweep bar
-    entry_pos  = _find_pos_15m(entry_ts)
+    # The sweep event timestamp is shifted +1 bar by the strategy; the actual
+    # candle that swept is 1 bar earlier on the TF chart.
+    anchor_pos = max(0, _fp(anchor_ts) - 1)
+    entry_pos  = _fp(entry_ts)
 
-    start_pos = max(0, anchor_pos - context_15m_before)
-    end_pos   = min(len(idx_arr) - 1, entry_pos + context_15m_after)
-
-    chart_df = df15m.iloc[start_pos : end_pos + 1].copy()
+    start_pos  = max(0, anchor_pos - context_bars_before)
+    end_pos    = min(len(idx_arr) - 1, entry_pos + context_bars_after)
+    chart_df   = df_tf.iloc[start_pos : end_pos + 1].copy()
     if chart_df.empty:
         return
 
     n = len(chart_df)
-
-    def _x15(ts: pd.Timestamp | None) -> float | None:
-        if ts is None:
-            return None
-        pos = chart_df.index.searchsorted(ts)
-        return float(min(pos, n - 1))
-
-    # The actual 15m sweep candle is 1 bar before the recorded sweep_ts
-    actual_sweep_ts = (
-        idx_arr[max(0, _find_pos_15m(sweep_ts) - 1)]
-        if sweep_ts is not None else None
-    )
-    x_sweep = _x15(actual_sweep_ts)
-    x_mss   = _x15(trade.setup_mss_time)
-    x_entry = _x15(entry_ts)
-
-    fig, ax = plt.subplots(figsize=(16, 7))
+    fig, ax = plt.subplots(figsize=(18, 6))
     _draw_candles(ax, chart_df)
+    _add_clean_levels(ax, chart_df, trade, draw_fvg_box=True)
 
-    # ── Horizontal sweep level — THE key ICT level ───────────────────────────
-    if trade.sweep_level is not None:
-        ax.axhline(trade.sweep_level, color="mediumpurple", linewidth=2.2,
-                   linestyle="--", alpha=0.95, zorder=5,
-                   label=f"15m Sweep Level (liquidity taken)  {trade.sweep_level:.1f}")
+    tick_step = max(1, n // 14)
+    tpos = list(range(0, n, tick_step))
+    ax.set_xticks(tpos)
+    ax.set_xticklabels(
+        [chart_df.index[p].strftime("%m/%d %H:%M") for p in tpos],
+        rotation=30, ha="right", fontsize=7,
+    )
 
-    # FVG zone (1m FVG projected as reference on 15m chart)
-    if trade.fvg_top is not None and trade.fvg_bottom is not None:
-        ax.axhspan(trade.fvg_bottom, trade.fvg_top,
-                   alpha=0.15, color="gold", zorder=2,
-                   label=f"1m FVG zone  {trade.fvg_bottom:.1f}–{trade.fvg_top:.1f}")
-
-    # Entry / stop / target
-    ax.axhline(trade.entry,  color="dodgerblue", linewidth=1.8,
-               linestyle="--", zorder=6, label=f"Entry  {trade.entry:.1f}")
-    ax.axhline(trade.stop,   color="crimson",    linewidth=1.8,
-               linestyle=":",  zorder=6, label=f"Stop (below sweep)  {trade.stop:.1f}")
-    ax.axhline(trade.target, color="limegreen",  linewidth=1.8,
-               linestyle="-.", zorder=6, label=f"Target  {trade.target:.1f}")
-
-    # ── Vertical event markers ────────────────────────────────────────────────
-    if x_sweep is not None:
-        ax.axvline(x_sweep, color="mediumpurple", linewidth=1.6,
-                   linestyle="--", alpha=0.85, label="15m Sweep candle")
-    if x_mss is not None:
-        ax.axvline(x_mss, color="darkorange", linewidth=1.6,
-                   linestyle="--", alpha=0.85, label="15m MSS / CHoCH")
-    if x_entry is not None:
-        ax.axvline(x_entry, color="dodgerblue", linewidth=1.6,
-                   linestyle="-", alpha=0.7, label="Trade entry (1m)")
-
-    # ── X-axis labels ────────────────────────────────────────────────────────
-    tick_step = max(1, n // 10)
-    tick_positions = list(range(0, n, tick_step))
-    tick_labels = [chart_df.index[p].strftime("%m/%d %H:%M") for p in tick_positions]
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=8)
-
-    # ── Title ────────────────────────────────────────────────────────────────
     outcome_str = (trade.outcome or "open").upper()
-    r_str = f"{trade.r_multiple:+.2f}R"
-    direction_icon = "▲ LONG" if trade.direction == "long" else "▼ SHORT"
     title_color = (
         "darkgreen" if trade.outcome == "win"
-        else "darkred" if trade.outcome == "loss"
-        else "goldenrod"
+        else "darkred" if trade.outcome == "loss" else "goldenrod"
     )
+    tf_label = tf.replace("min", "m").replace("T", "m")
     ax.set_title(
-        f"Trade #{trade_num:03d}  |  {direction_icon}  |  {trade.killzone.upper()}  "
-        f"|  {outcome_str}  {r_str}\n"
-        f"15m Context Chart  —  "
-        f"Entry: {entry_ts.strftime('%Y-%m-%d %H:%M')}  "
-        f"|  Purple dashed = liquidity sweep level (horizontal)",
-        fontsize=10, fontweight="bold", color=title_color,
+        f"#{trade_num:03d} {'▲' if trade.direction == 'long' else '▼'}"
+        f"  {trade.killzone.upper()}  {outcome_str}  {trade.r_multiple:+.2f}R"
+        f"  |  {tf_label}  |  {entry_ts.strftime('%Y-%m-%d %H:%M')}",
+        fontsize=9, fontweight="bold", color=title_color,
     )
-    ax.set_ylabel("Price (NAS pts)")
-    ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
-    ax.grid(alpha=0.2)
+    ax.set_ylabel("Price", fontsize=8)
+    ax.legend(loc="upper left", fontsize=7, framealpha=0.7, handlelength=1.5)
+    ax.grid(alpha=0.15)
 
-    price_range = chart_df["high"].max() - chart_df["low"].min()
-    margin = max(price_range * 0.10, 5.0)
+    pr = chart_df["high"].max() - chart_df["low"].min()
+    margin = max(pr * 0.07, 3.0)
     ax.set_ylim(chart_df["low"].min() - margin, chart_df["high"].max() + margin)
-
     plt.tight_layout()
-    plt.savefig(out_path, dpi=110)
+    plt.savefig(out_path, dpi=120)
     plt.close(fig)
+
+
+def plot_trade_chart_15m(
+    trade: "Trade",
+    df1m: pd.DataFrame,
+    out_path: str,
+    trade_num: int = 0,
+    context_15m_before: int = 80,
+    context_15m_after: int = 6,
+) -> None:
+    """15m context chart with 80 bars before sweep."""
+    _plot_trade_tf_chart(
+        trade, df1m, "15min", out_path,
+        trade_num=trade_num,
+        context_bars_before=context_15m_before,
+        context_bars_after=context_15m_after,
+    )
+
+
+def plot_trade_chart_5m(
+    trade: "Trade",
+    df1m: pd.DataFrame,
+    out_path: str,
+    trade_num: int = 0,
+    context_5m_before: int = 80,
+    context_5m_after: int = 10,
+) -> None:
+    """5m context chart with 80 bars before sweep."""
+    _plot_trade_tf_chart(
+        trade, df1m, "5min", out_path,
+        trade_num=trade_num,
+        context_bars_before=context_5m_before,
+        context_bars_after=context_5m_after,
+    )
 
 
 def plot_all_trade_charts(
     trades: list[Trade],
     df1m: pd.DataFrame,
     charts_dir: str | Path,
-    context_bars_before: int = 60,
-    context_bars_after: int = 15,
+    context_bars_before: int = 80,
+    context_bars_after: int = 20,
 ) -> None:
-    """Generate two charts per trade, saved into individual subfolders.
+    """Generate three charts per trade, saved into individual subfolders.
 
-    Subfolder name format:
-        {idx:03d}_{date}_{HHMM}_{direction}_{outcome}/
-    Inside each subfolder:
-        15m_context.png   — 15m candles showing horizontal sweep level, MSS,
-                             FVG zone, entry/stop/target lines
-        1m_entry.png      — 1m candles zoomed into the entry, same levels
+    Subfolder: {idx:03d}_{date}_{HHMM}_{direction}_{outcome}/
+    Files:
+        15m_context.png  — 15m candles (80 bars before sweep)
+        5m_context.png   — 5m candles  (80 bars before sweep)
+        1m_entry.png     — 1m candles  (80 bars before sweep, 20 after exit)
+    All charts show only: liquidity level, FVG box, entry, SL, TP.
+    No vertical lines, no shading.
     """
     out = Path(charts_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     total = len(trades)
-    print(f"  Generating {total} trade folders (2 charts each) → {out}/")
+    print(f"  Generating {total} trade folders (3 charts each) → {out}/")
     for idx, t in enumerate(trades, start=1):
         outcome = t.outcome or "open"
         date_str = t.entry_time.strftime("%Y-%m-%d_%H%M")
-        folder_name = (
-            f"{idx:03d}_{date_str}_{t.direction}_{outcome}"
-        )
-        folder = out / folder_name
+        folder = out / f"{idx:03d}_{date_str}_{t.direction}_{outcome}"
         folder.mkdir(exist_ok=True)
 
-        plot_trade_chart_15m(
-            t, df1m, str(folder / "15m_context.png"),
-            trade_num=idx,
-        )
+        plot_trade_chart_15m(t, df1m, str(folder / "15m_context.png"), trade_num=idx)
+        plot_trade_chart_5m(t, df1m,  str(folder / "5m_context.png"),  trade_num=idx)
         plot_trade_chart(
             t, df1m, str(folder / "1m_entry.png"),
             trade_num=idx,

@@ -44,7 +44,7 @@ from .ict_primitives import (
 # ---------------------------------------------------------------------------
 KILLZONES_ET: dict[str, tuple[dtime, dtime]] = {
     "london": (dtime(3, 0),  dtime(5, 0)),
-    "am":     (dtime(9, 30), dtime(12, 0)),
+    "am":     (dtime(8, 0), dtime(12, 0)),   # expanded: 08:00–12:00 ET
     "pm":     (dtime(13, 0), dtime(16, 0)),
 }
 
@@ -80,6 +80,8 @@ class Trade:
     sweep_level: float | None = None   # the 15m swing price that was swept (horizontal level)
     fvg_top: float | None = None       # top of the entry FVG on 1m
     fvg_bottom: float | None = None    # bottom of the entry FVG on 1m
+    fvg_time: pd.Timestamp | None = None   # when the entry FVG formed
+    setup_mss_tf: str = "15m"              # timeframe where MSS was detected
 
 
 @dataclass
@@ -140,14 +142,18 @@ def run_2022_model(
     # HTF bias (4H EMA cross)
     ema_fast: int = 20,
     ema_slow: int = 50,
-    # 15m sweep / MSS parameters
+    # 15m sweep parameters
     sweep_window_15m: int = 20,       # bars on 15m for sweep detection (~5h)
     sweep_max_age: pd.Timedelta = pd.Timedelta(hours=6),
-    mss_lookback_15m: int = 50,       # bars on 15m for MSS detection
-    arm_window: pd.Timedelta = pd.Timedelta(hours=3),  # how long after MSS to look for entry
+    # MSS parameters — default to 1m for faster confirmation
+    mss_tf: str = "1m",               # timeframe for MSS: "1m", "5m", or "15m"
+    mss_lookback: int = 50,           # bars on the MSS timeframe for lookback
+    arm_window: pd.Timedelta = pd.Timedelta(minutes=90),   # time after MSS to look for entry
+    # Entry filter: skip if price has already moved too far from sweep before MSS
+    max_sweep_to_mss_atr: float = 4.0,   # max |close − sweep_level| in ATR(14, 1m) at arm time
     # 1m entry parameters
     min_fvg_size_atr: float = 0.2,    # FVG must be ≥ N × ATR(14) on 1m
-    fvg_max_age_bars: int = 30,       # max 1m bars to wait for retrace (30 min)
+    fvg_max_age_bars: int = 20,       # max 1m bars to wait for retrace (20 min)
     trade_expiry_bars: int = 120,     # max 1m bars to hold a trade (2h)
     max_trades_per_arm: int = 1,      # max entries per armed setup
     cost_per_side_pts: float = 1.0,   # spread + slip (NAS points)
@@ -200,17 +206,30 @@ def run_2022_model(
     sweep_high_events = build_level_event_list(sweep_high_flag, sweep_high_lvl)  # bear setup
 
     # ------------------------------------------------------------------
-    # 4. 15m MSS events (computed on sweep-annotated frame so the same
-    #    copy of the frame is used; MSS logic only reads OHLC)
+    # 4. MSS / CHoCH events on the requested timeframe (mss_tf)
     #
-    # Leak-free: MSS uses close-of-bar data on the 15m frame; shift by 1
-    # so events are only visible after the bar that generated them closes.
+    # Leak-free: MSS uses close-of-bar data; shift by 1 so events are
+    # only visible after the bar that generated them closes.
     # ------------------------------------------------------------------
-    df15m_mss = detect_mss(df15m_sw, lookback=mss_lookback_15m)
-    mss_up_events = build_event_list(
-        df15m_mss["mss_up"].shift(1).fillna(False))   # bull MSS (CHoCH up)
-    mss_dn_events = build_event_list(
-        df15m_mss["mss_dn"].shift(1).fillna(False))   # bear MSS (CHoCH dn)
+    if mss_tf == "1m":
+        df_mss = detect_mss(df1m, lookback=mss_lookback)
+        mss_up_events = build_event_list(
+            df_mss["mss_up"].shift(1).fillna(False))
+        mss_dn_events = build_event_list(
+            df_mss["mss_dn"].shift(1).fillna(False))
+    elif mss_tf == "5m":
+        df5m = resample(df1m, "5min")
+        df5m_mss = detect_mss(df5m, lookback=mss_lookback)
+        mss_up_events = build_event_list(
+            df5m_mss["mss_up"].shift(1).fillna(False))
+        mss_dn_events = build_event_list(
+            df5m_mss["mss_dn"].shift(1).fillna(False))
+    else:  # "15m"
+        df15m_mss = detect_mss(df15m_sw, lookback=mss_lookback)
+        mss_up_events = build_event_list(
+            df15m_mss["mss_up"].shift(1).fillna(False))
+        mss_dn_events = build_event_list(
+            df15m_mss["mss_dn"].shift(1).fillna(False))
 
     # ------------------------------------------------------------------
     # 5. 1m FVGs and Order Blocks (full pre-computation, index lookup)
@@ -304,8 +323,15 @@ def run_2022_model(
                 diag.bars_sweep_found += 1
                 mss = first_event_between(mss_up_events, sw, ts)
                 if mss is not None:
+                    # Move-size filter: skip if price has already run too far from
+                    # the swept level before we'd enter (= stale move)
+                    atr_now = _atr(h, l, i)
+                    move_ok = (
+                        atr_now == 0
+                        or abs(c[i] - sw_level) <= max_sweep_to_mss_atr * atr_now
+                    )
                     # New or refreshed bull arm
-                    if arm_dir != "long" or mss != arm_mss_time:
+                    if move_ok and (arm_dir != "long" or mss != arm_mss_time):
                         arm_dir = "long"
                         arm_expires = mss + arm_window
                         arm_sweep_time = sw
@@ -322,7 +348,12 @@ def run_2022_model(
                 diag.bars_sweep_found += 1
                 mss = first_event_between(mss_dn_events, sw, ts)
                 if mss is not None:
-                    if arm_dir != "short" or mss != arm_mss_time:
+                    atr_now = _atr(h, l, i)
+                    move_ok = (
+                        atr_now == 0
+                        or abs(c[i] - sw_level) <= max_sweep_to_mss_atr * atr_now
+                    )
+                    if move_ok and (arm_dir != "short" or mss != arm_mss_time):
                         arm_dir = "short"
                         arm_expires = mss + arm_window
                         arm_sweep_time = sw
@@ -439,6 +470,8 @@ def run_2022_model(
                                     sweep_level=arm_sweep_level,
                                     fvg_top=fvg.top,
                                     fvg_bottom=fvg.bottom,
+                                    fvg_time=fvg.time,
+                                    setup_mss_tf=mss_tf,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -466,6 +499,8 @@ def run_2022_model(
                                     sweep_level=arm_sweep_level,
                                     fvg_top=fvg.top,
                                     fvg_bottom=fvg.bottom,
+                                    fvg_time=fvg.time,
+                                    setup_mss_tf=mss_tf,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -493,6 +528,7 @@ def run_2022_model(
                                     setup_mss_time=arm_mss_time,
                                     sweep_level=arm_sweep_level,
                                     fvg_top=None, fvg_bottom=None,
+                                    fvg_time=None, setup_mss_tf=mss_tf,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
@@ -518,6 +554,7 @@ def run_2022_model(
                                     setup_mss_time=arm_mss_time,
                                     sweep_level=arm_sweep_level,
                                     fvg_top=None, fvg_bottom=None,
+                                    fvg_time=None, setup_mss_tf=mss_tf,
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1

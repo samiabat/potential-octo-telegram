@@ -1,13 +1,14 @@
 """2022 Model backtest — full 1m_data.csv (2016-2025), AM session only.
 
 Runs the ICT 2022 Model on the full dataset with the AM killzone filter
-(09:30–12:00 ET) and writes all results to big_test_only_am/.
+(08:00–12:00 ET) and writes all results to big_test_only_am/.
 
 Usage:
     python3 run_big_test_only_am.py
 """
 from __future__ import annotations
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,8 @@ from model_2022.backtest import (
     plot_breakdown,
     plot_monthly,
     plot_all_trade_charts,
+    plot_trade_chart_5m,
+    plot_trade_chart_15m,
 )
 
 DATA_PATH   = "1m_data.csv"
@@ -61,9 +64,9 @@ def main() -> None:
     print(f"  {len(df1m):,} bars   {df1m.index[0]}  →  {df1m.index[-1]}")
 
     # ------------------------------------------------------------------
-    # Run model — AM session only
+    # Run model — AM session only (08:00–12:00 ET)
     # ------------------------------------------------------------------
-    print("\nRunning 2022 Model (AM killzone only: 09:30–12:00 ET) …")
+    print("\nRunning 2022 Model (AM killzone: 08:00–12:00 ET, 1m MSS) …")
     trades, diag = run_2022_model(
         df1m,
         rr=RR,
@@ -71,10 +74,12 @@ def main() -> None:
         ema_slow=50,
         sweep_window_15m=20,
         sweep_max_age=pd.Timedelta(hours=4),
-        mss_lookback_15m=50,
-        arm_window=pd.Timedelta(hours=2),
+        mss_tf="1m",                              # use 1m MSS for faster confirmation
+        mss_lookback=50,
+        arm_window=pd.Timedelta(minutes=90),      # 90 min window after MSS
+        max_sweep_to_mss_atr=4.0,                 # skip if move already > 4×ATR
         min_fvg_size_atr=0.2,
-        fvg_max_age_bars=30,
+        fvg_max_age_bars=20,                      # 20 min max wait for retrace
         trade_expiry_bars=120,
         max_trades_per_arm=1,
         cost_per_side_pts=1.0,
@@ -83,7 +88,7 @@ def main() -> None:
         use_ob=False,
         use_fvg=True,
         use_killzones=True,
-        allowed_killzones={"am"},   # AM only
+        allowed_killzones={"am"},
     )
     print(f"  {len(trades)} trades generated")
 
@@ -168,22 +173,25 @@ def main() -> None:
     print(f"\nAll results written to {RESULTS_DIR}/")
 
     # ------------------------------------------------------------------
-    # Per-trade charts for 2020+ trades (2 charts each in own subfolder)
+    # Per-trade charts for 2020+ trades (3 charts each in own subfolder)
     # ------------------------------------------------------------------
     CHART_START = pd.Timestamp("2020-01-01", tz="America/New_York")
-    trades_2020 = [
-        t for t in trades
-        if t.entry_time >= CHART_START
-    ]
+    trades_2020 = [t for t in trades if t.entry_time >= CHART_START]
+
+    chart_dir = RESULTS_DIR / "trade_charts_2020"
+    # Clear old charts before regenerating
+    if chart_dir.exists():
+        shutil.rmtree(chart_dir)
+        print(f"\nCleared old charts from {chart_dir}/")
+
     if trades_2020:
-        chart_dir = RESULTS_DIR / "trade_charts_2020"
         print(f"\nGenerating per-trade charts for {len(trades_2020)} "
               f"2020+ trades → {chart_dir}/")
         plot_all_trade_charts(
             trades_2020,
             df1m,
             chart_dir,
-            context_bars_before=80,   # ~80 min of 1m context before sweep
+            context_bars_before=80,
             context_bars_after=20,
         )
     else:
