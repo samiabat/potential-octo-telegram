@@ -30,6 +30,7 @@ import pandas as pd
 
 from .data_loader import resample
 from .ict_primitives import (
+    swing_points,
     htf_bias, align_bias_to_ltf,
     liquidity_sweep, detect_mss,
     detect_fvgs, detect_order_blocks,
@@ -107,6 +108,39 @@ def _atr(highs: np.ndarray, lows: np.ndarray, i: int, n: int = 14) -> float:
     if i < n:
         return 0.0
     return float((highs[i - n: i] - lows[i - n: i]).mean())
+
+
+def _nearest_swing_sl(
+    sw_low_prices: np.ndarray,
+    sw_high_prices: np.ndarray,
+    direction: str,
+    entry_px: float,
+    bar_i: int,
+    lookback: int = 60,
+) -> float | None:
+    """Find the nearest 1m swing low (for long) or swing high (for short)
+    that is below/above the entry price within *lookback* bars.
+
+    Returns the swing price level, or None if no qualifying swing is found.
+    """
+    if direction == "long":
+        best: float | None = None
+        for j in range(bar_i, max(bar_i - lookback, -1), -1):
+            lvl = sw_low_prices[j]
+            if not np.isnan(lvl) and lvl < entry_px:
+                if best is None or lvl > best:   # closest (highest) swing low below entry
+                    best = lvl
+                    break   # fractal swings are in ascending index order; first one found is nearest
+        return best
+    else:  # short
+        best = None
+        for j in range(bar_i, max(bar_i - lookback, -1), -1):
+            lvl = sw_high_prices[j]
+            if not np.isnan(lvl) and lvl > entry_px:
+                if best is None or lvl < best:
+                    best = lvl
+                    break
+        return best
 
 
 def _close_trade(
@@ -246,6 +280,14 @@ def run_2022_model(
         obs_by_idx.setdefault(o.idx, []).append(o)
 
     # ------------------------------------------------------------------
+    # 5b. 1m swing points — used for SL placement below swing low /
+    #     above swing high (no look-ahead: recorded at confirmation bar)
+    # ------------------------------------------------------------------
+    df1m_sw        = swing_points(df1m, n=2)
+    sw_low_prices  = df1m_sw["swing_low_price"].values   # NaN where no swing
+    sw_high_prices = df1m_sw["swing_high_price"].values
+
+    # ------------------------------------------------------------------
     # 6. Walk 1m bars
     # ------------------------------------------------------------------
     h = df1m["high"].values
@@ -266,6 +308,10 @@ def run_2022_model(
     arm_sweep_level: float | None = None  # 15m price level that was swept (for SL)
     arm_mss_time: pd.Timestamp | None = None
     arm_trades: int = 0                  # trades taken in current arm
+
+    # Track which sweep timestamps have already produced a trade.
+    # One sweep → at most one trade; once used the sweep is consumed.
+    used_sweep_times: set[pd.Timestamp] = set()
 
     # Pending 1m entries (FVGs / OBs waiting for a retrace)
     pending: list[dict] = []
@@ -320,47 +366,57 @@ def run_2022_model(
             sw_result = most_recent_level_event_before(sweep_low_events, ts, sweep_max_age)
             if sw_result is not None:
                 sw, sw_level = sw_result
-                diag.bars_sweep_found += 1
-                mss = first_event_between(mss_up_events, sw, ts)
-                if mss is not None:
-                    # Move-size filter: skip if price has already run too far from
-                    # the swept level before we'd enter (= stale move)
-                    atr_now = _atr(h, l, i)
-                    move_ok = (
-                        atr_now == 0
-                        or abs(c[i] - sw_level) <= max_sweep_to_mss_atr * atr_now
-                    )
-                    # New or refreshed bull arm
-                    if move_ok and (arm_dir != "long" or mss != arm_mss_time):
-                        arm_dir = "long"
-                        arm_expires = mss + arm_window
-                        arm_sweep_time = sw
-                        arm_sweep_level = sw_level
-                        arm_mss_time = mss
-                        arm_trades = 0
-                        pending = []   # reset pending from old arm
+                # Skip sweeps that already produced a trade (one sweep = one trade)
+                if sw not in used_sweep_times:
+                    diag.bars_sweep_found += 1
+                    mss = first_event_between(mss_up_events, sw, ts)
+                    if mss is not None:
+                        # Move-size filter: skip if price has already run too far from
+                        # the swept level before we'd enter (= stale move)
+                        atr_now = _atr(h, l, i)
+                        move_ok = (
+                            atr_now == 0
+                            or abs(c[i] - sw_level) <= max_sweep_to_mss_atr * atr_now
+                        )
+                        # New or refreshed bull arm
+                        if move_ok and (arm_dir != "long" or mss != arm_mss_time):
+                            same_sweep = (arm_dir == "long" and sw == arm_sweep_time)
+                            arm_dir = "long"
+                            arm_expires = mss + arm_window
+                            arm_sweep_time = sw
+                            arm_sweep_level = sw_level
+                            arm_mss_time = mss
+                            arm_trades = 0
+                            # Keep pending FVGs when refreshing within the same sweep
+                            # so existing retrace opportunities are not lost.
+                            if not same_sweep:
+                                pending = []
 
         # Bear cascade: bias -1, sweep-high, MSS-dn
         elif bias == -1:
             sw_result = most_recent_level_event_before(sweep_high_events, ts, sweep_max_age)
             if sw_result is not None:
                 sw, sw_level = sw_result
-                diag.bars_sweep_found += 1
-                mss = first_event_between(mss_dn_events, sw, ts)
-                if mss is not None:
-                    atr_now = _atr(h, l, i)
-                    move_ok = (
-                        atr_now == 0
-                        or abs(c[i] - sw_level) <= max_sweep_to_mss_atr * atr_now
-                    )
-                    if move_ok and (arm_dir != "short" or mss != arm_mss_time):
-                        arm_dir = "short"
-                        arm_expires = mss + arm_window
-                        arm_sweep_time = sw
-                        arm_sweep_level = sw_level
-                        arm_mss_time = mss
-                        arm_trades = 0
-                        pending = []
+                # Skip sweeps that already produced a trade (one sweep = one trade)
+                if sw not in used_sweep_times:
+                    diag.bars_sweep_found += 1
+                    mss = first_event_between(mss_dn_events, sw, ts)
+                    if mss is not None:
+                        atr_now = _atr(h, l, i)
+                        move_ok = (
+                            atr_now == 0
+                            or abs(c[i] - sw_level) <= max_sweep_to_mss_atr * atr_now
+                        )
+                        if move_ok and (arm_dir != "short" or mss != arm_mss_time):
+                            same_sweep = (arm_dir == "short" and sw == arm_sweep_time)
+                            arm_dir = "short"
+                            arm_expires = mss + arm_window
+                            arm_sweep_time = sw
+                            arm_sweep_level = sw_level
+                            arm_mss_time = mss
+                            arm_trades = 0
+                            if not same_sweep:
+                                pending = []
 
         # Check arm expiry
         is_armed = (
@@ -448,11 +504,15 @@ def run_2022_model(
                         fvg = p["fvg"]
                         if p["dir"] == "long" and l[i] <= fvg.top and h[i] >= fvg.bottom:
                             entry_px = min(c[i], fvg.top)
-                            # ICT SL: below the 15m swept swing low (the horizontal
-                            # level that was taken out before reversal).  Fall back
-                            # to FVG bottom if the sweep level is unavailable or
-                            # would produce a stop ABOVE the entry (degenerate case).
-                            if arm_sweep_level is not None and arm_sweep_level < entry_px:
+                            # SL: find the nearest 1m swing low below entry.
+                            # Fall back to sweep level, then FVG bottom.
+                            sw_sl = _nearest_swing_sl(
+                                sw_low_prices, sw_high_prices,
+                                "long", entry_px, i,
+                            )
+                            if sw_sl is not None and sw_sl < entry_px:
+                                stop_px = sw_sl - 0.5 * atr
+                            elif arm_sweep_level is not None and arm_sweep_level < entry_px:
                                 stop_px = arm_sweep_level - 0.1 * atr
                             else:
                                 stop_px = fvg.bottom - 0.1 * atr
@@ -475,13 +535,20 @@ def run_2022_model(
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
+                                used_sweep_times.add(arm_sweep_time)  # consume sweep
                                 diag.trades_taken += 1
                                 entry_taken = True
 
                         elif p["dir"] == "short" and h[i] >= fvg.bottom and l[i] <= fvg.top:
                             entry_px = max(c[i], fvg.bottom)
-                            # ICT SL: above the 15m swept swing high.
-                            if arm_sweep_level is not None and arm_sweep_level > entry_px:
+                            # SL: find the nearest 1m swing high above entry.
+                            sw_sl = _nearest_swing_sl(
+                                sw_low_prices, sw_high_prices,
+                                "short", entry_px, i,
+                            )
+                            if sw_sl is not None and sw_sl > entry_px:
+                                stop_px = sw_sl + 0.5 * atr
+                            elif arm_sweep_level is not None and arm_sweep_level > entry_px:
                                 stop_px = arm_sweep_level + 0.1 * atr
                             else:
                                 stop_px = fvg.top + 0.1 * atr
@@ -504,6 +571,7 @@ def run_2022_model(
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
+                                used_sweep_times.add(arm_sweep_time)  # consume sweep
                                 diag.trades_taken += 1
                                 entry_taken = True
 
@@ -511,7 +579,13 @@ def run_2022_model(
                         ob = p["ob"]
                         if p["dir"] == "long" and l[i] <= ob.ob_high and h[i] >= ob.ob_low:
                             entry_px = min(c[i], ob.ob_high)
-                            if arm_sweep_level is not None and arm_sweep_level < entry_px:
+                            sw_sl = _nearest_swing_sl(
+                                sw_low_prices, sw_high_prices,
+                                "long", entry_px, i,
+                            )
+                            if sw_sl is not None and sw_sl < entry_px:
+                                stop_px = sw_sl - 0.5 * atr
+                            elif arm_sweep_level is not None and arm_sweep_level < entry_px:
                                 stop_px = arm_sweep_level - 0.1 * atr
                             else:
                                 stop_px = ob.ob_low - 0.1 * atr
@@ -532,12 +606,19 @@ def run_2022_model(
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
+                                used_sweep_times.add(arm_sweep_time)  # consume sweep
                                 diag.trades_taken += 1
                                 entry_taken = True
 
                         elif p["dir"] == "short" and h[i] >= ob.ob_low and l[i] <= ob.ob_high:
                             entry_px = max(c[i], ob.ob_low)
-                            if arm_sweep_level is not None and arm_sweep_level > entry_px:
+                            sw_sl = _nearest_swing_sl(
+                                sw_low_prices, sw_high_prices,
+                                "short", entry_px, i,
+                            )
+                            if sw_sl is not None and sw_sl > entry_px:
+                                stop_px = sw_sl + 0.5 * atr
+                            elif arm_sweep_level is not None and arm_sweep_level > entry_px:
                                 stop_px = arm_sweep_level + 0.1 * atr
                             else:
                                 stop_px = ob.ob_high + 0.1 * atr
@@ -558,6 +639,7 @@ def run_2022_model(
                                 )
                                 open_trade_bars = 0
                                 arm_trades += 1
+                                used_sweep_times.add(arm_sweep_time)  # consume sweep
                                 diag.trades_taken += 1
                                 entry_taken = True
 

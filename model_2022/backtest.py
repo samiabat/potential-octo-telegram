@@ -578,6 +578,197 @@ def plot_trade_chart_5m(
     )
 
 
+
+def _zigzag_swings(
+    df_sw: pd.DataFrame,
+    n_swings: int = 40,
+) -> list[tuple[int, float, str]]:
+    """Return the last *n_swings* turning-point (bar_pos, price, label).
+
+    Labels: HH / LH (swing highs) and HL / LL (swing lows).
+    bar_pos is the integer row index inside df_sw.
+    """
+    highs: list[tuple[int, float]] = []
+    lows:  list[tuple[int, float]] = []
+    for i in range(len(df_sw)):
+        if df_sw["swing_high"].iat[i]:
+            highs.append((i, float(df_sw["swing_high_price"].iat[i])))
+        if df_sw["swing_low"].iat[i]:
+            lows.append((i, float(df_sw["swing_low_price"].iat[i])))
+
+    # Merge into one stream sorted by bar position
+    all_swings: list[tuple[int, float, str]] = (
+        [(i, p, "H") for i, p in highs] +
+        [(i, p, "L") for i, p in lows]
+    )
+    all_swings.sort(key=lambda x: x[0])
+
+    # Take last n_swings
+    all_swings = all_swings[-n_swings:]
+
+    # Label each point relative to the previous same-type swing
+    labeled: list[tuple[int, float, str]] = []
+    prev_h: float | None = None
+    prev_l: float | None = None
+    for i, price, typ in all_swings:
+        if typ == "H":
+            if prev_h is None:
+                label = "SH"          # first swing high — no comparison yet
+            elif price > prev_h:
+                label = "HH"
+            else:
+                label = "LH"
+            prev_h = price
+        else:
+            if prev_l is None:
+                label = "SL"
+            elif price > prev_l:
+                label = "HL"
+            else:
+                label = "LL"
+            prev_l = price
+        labeled.append((i, price, label))
+
+    return labeled
+
+
+def plot_htf_swing_chart(
+    trade: "Trade",
+    df1m: pd.DataFrame,
+    tf: str,
+    out_path: str,
+    trade_num: int = 0,
+    context_bars_before: int = 60,
+    context_bars_after: int = 5,
+    swing_n: int = 3,
+) -> None:
+    """HTF (4H or Daily) chart with zigzag HH/HL/LH/LL drawing.
+
+    Shows:
+      • Candles (clean OHLC)
+      • Zigzag line connecting confirmed swing highs and lows
+      • HH / LH / HL / LL labels at each turning point
+      • Horizontal lines for entry, SL, TP
+      • Vertical dashed line marking the entry bar
+    No lower-timeframe detail (no FVG boxes, no 1m noise).
+    """
+    from .data_loader import resample as _resample
+    from .ict_primitives import swing_points as _swings
+
+    df_tf = _resample(df1m, tf)
+    if df_tf.empty:
+        return
+
+    df_sw = _swings(df_tf, n=swing_n)
+
+    entry_ts = trade.entry_time
+    idx_arr  = df_tf.index
+
+    def _fp(ts, fallback=0):
+        if ts is None:
+            return fallback
+        return int(min(idx_arr.searchsorted(ts), len(idx_arr) - 1))
+
+    entry_pos = _fp(entry_ts)
+    start_pos = max(0, entry_pos - context_bars_before)
+    end_pos   = min(len(idx_arr) - 1, entry_pos + context_bars_after)
+    chart_df  = df_sw.iloc[start_pos: end_pos + 1].copy()
+    if chart_df.empty:
+        return
+
+    n = len(chart_df)
+    fig, ax = plt.subplots(figsize=(18, 7))
+    _draw_candles(ax, chart_df)
+
+    # ── Zigzag ──────────────────────────────────────────────────────────
+    zz = _zigzag_swings(chart_df, n_swings=60)
+    if len(zz) >= 2:
+        zz_x = [p for p, _, _ in zz]
+        zz_y = [pr for _, pr, _ in zz]
+        ax.plot(zz_x, zz_y,
+                color="white", linewidth=1.2, alpha=0.85,
+                linestyle="--", zorder=5)
+
+    LABEL_COLORS = {
+        "HH": "#00e676",  "LH": "#ff5252",
+        "HL": "#69f0ae",  "LL": "#ff1744",
+        "SH": "#b2dfdb",  "SL": "#ffcdd2",
+    }
+    for pos, price, label in zz:
+        color = LABEL_COLORS.get(label, "white")
+        is_high = label in ("HH", "LH", "SH")
+        va = "bottom" if is_high else "top"
+        offset = 0.3 if is_high else -0.3
+        ax.annotate(
+            label,
+            xy=(pos, price),
+            xytext=(0, 8 if is_high else -8),
+            textcoords="offset points",
+            ha="center", va=va,
+            fontsize=7, fontweight="bold",
+            color=color,
+            zorder=7,
+        )
+        ax.plot(pos, price, "o", color=color, markersize=4, zorder=6)
+
+    # ── Entry / SL / TP ─────────────────────────────────────────────────
+    lw = 0.7
+    ax.axhline(trade.entry,  color="dodgerblue", linewidth=lw,
+               linestyle="-",  zorder=8, label=f"Entry  {trade.entry:.1f}")
+    ax.axhline(trade.stop,   color="crimson",    linewidth=lw,
+               linestyle="-",  zorder=8, label=f"SL  {trade.stop:.1f}")
+    ax.axhline(trade.target, color="#00cc44",    linewidth=lw,
+               linestyle="-",  zorder=8, label=f"TP  {trade.target:.1f}")
+
+    # ── Vertical entry marker ────────────────────────────────────────────
+    rel_entry = entry_pos - start_pos
+    if 0 <= rel_entry < n:
+        ax.axvline(rel_entry, color="gold", linewidth=0.8,
+                   linestyle=":", alpha=0.7, zorder=5, label="Entry bar")
+
+    # ── Axes ─────────────────────────────────────────────────────────────
+    tick_step = max(1, n // 14)
+    tpos = list(range(0, n, tick_step))
+    fmt  = "%Y-%m-%d" if tf.upper() in ("1D", "D", "1d") else "%m/%d %H:%M"
+    ax.set_xticks(tpos)
+    ax.set_xticklabels(
+        [chart_df.index[p].strftime(fmt) for p in tpos],
+        rotation=30, ha="right", fontsize=7,
+    )
+
+    outcome_str = (trade.outcome or "open").upper()
+    title_color = (
+        "darkgreen" if trade.outcome == "win"
+        else "darkred" if trade.outcome == "loss" else "goldenrod"
+    )
+    tf_label = tf.upper().replace("MIN", "m").replace("H", "H")
+    bias_dir = "BULL" if trade.direction == "long" else "BEAR"
+    ax.set_title(
+        f"#{trade_num:03d}  {tf_label} Bias — {bias_dir}  |  "
+        f"{'▲' if trade.direction == 'long' else '▼'}  "
+        f"{outcome_str}  {trade.r_multiple:+.2f}R  |  "
+        f"{entry_ts.strftime('%Y-%m-%d %H:%M')}",
+        fontsize=9, fontweight="bold", color=title_color,
+    )
+    ax.set_ylabel("Price", fontsize=8)
+    ax.legend(loc="upper left", fontsize=7, framealpha=0.7, handlelength=1.5)
+    ax.grid(alpha=0.15)
+    ax.set_facecolor("#0d1117")
+    fig.patch.set_facecolor("#0d1117")
+    ax.tick_params(colors="white")
+    ax.yaxis.label.set_color("white")
+    ax.title.set_color(title_color)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#444")
+
+    pr = chart_df["high"].max() - chart_df["low"].min()
+    margin = max(pr * 0.08, 5.0)
+    ax.set_ylim(chart_df["low"].min() - margin, chart_df["high"].max() + margin)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=110)
+    plt.close(fig)
+
+
 def plot_all_trade_charts(
     trades: list[Trade],
     df1m: pd.DataFrame,
@@ -585,27 +776,41 @@ def plot_all_trade_charts(
     context_bars_before: int = 80,
     context_bars_after: int = 20,
 ) -> None:
-    """Generate three charts per trade, saved into individual subfolders.
+    """Generate five charts per trade, saved into individual subfolders.
 
     Subfolder: {idx:03d}_{date}_{HHMM}_{direction}_{outcome}/
     Files:
+        1d_bias.png      — Daily candles with zigzag HH/HL/LH/LL
+        4h_bias.png      — 4H candles with zigzag HH/HL/LH/LL
         15m_context.png  — 15m candles (80 bars before sweep)
         5m_context.png   — 5m candles  (80 bars before sweep)
         1m_entry.png     — 1m candles  (80 bars before sweep, 20 after exit)
-    All charts show only: liquidity level, FVG box, entry, SL, TP.
-    No vertical lines, no shading.
+    Lower-TF charts show only: liquidity level, FVG box, entry, SL, TP.
+    HTF charts show zigzag structure + entry/SL/TP.
     """
     out = Path(charts_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     total = len(trades)
-    print(f"  Generating {total} trade folders (3 charts each) → {out}/")
+    print(f"  Generating {total} trade folders (5 charts each) → {out}/")
     for idx, t in enumerate(trades, start=1):
         outcome = t.outcome or "open"
         date_str = t.entry_time.strftime("%Y-%m-%d_%H%M")
         folder = out / f"{idx:03d}_{date_str}_{t.direction}_{outcome}"
         folder.mkdir(exist_ok=True)
 
+        # HTF bias charts (zigzag structure)
+        plot_htf_swing_chart(
+            t, df1m, "1D", str(folder / "1d_bias.png"),
+            trade_num=idx, context_bars_before=90, context_bars_after=3,
+            swing_n=3,
+        )
+        plot_htf_swing_chart(
+            t, df1m, "4h", str(folder / "4h_bias.png"),
+            trade_num=idx, context_bars_before=60, context_bars_after=4,
+            swing_n=3,
+        )
+        # Lower-TF execution charts
         plot_trade_chart_15m(t, df1m, str(folder / "15m_context.png"), trade_num=idx)
         plot_trade_chart_5m(t, df1m,  str(folder / "5m_context.png"),  trade_num=idx)
         plot_trade_chart(

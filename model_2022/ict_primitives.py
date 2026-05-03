@@ -1,8 +1,12 @@
-"""ICT primitives for the 2022 Model.
+"""ICT primitives for the 2022 Model (self-contained, no external dependencies).
 
-Extends the silver_bullet primitives with:
+Includes:
+  - Swing point detection (fractal, no look-ahead)
+  - Fair Value Gap (FVG) detection
+  - Market Structure Shift (MSS / CHoCH) detection
+  - Liquidity sweep detection
+  - Higher-timeframe bias (EMA cross)
   - Order Block (OB) detection on 1m
-  - HTF bias via EMA cross (same as silver_bullet, plus a structure variant)
   - Helpers shared with the strategy module
 """
 from __future__ import annotations
@@ -13,16 +17,169 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# Re-export shared primitives from silver_bullet so callers only import here.
-from silver_bullet.ict_primitives import (  # noqa: F401
-    swing_points,
-    FVG,
-    detect_fvgs,
-    detect_mss,
-    liquidity_sweep,
-    htf_bias,
-    align_bias_to_ltf,
-)
+
+# ---------------------------------------------------------------------------
+# Swing points (fractal, no look-ahead)
+# ---------------------------------------------------------------------------
+
+def swing_points(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
+    """Mark n-bar fractal swing highs/lows.
+
+    To avoid look-ahead bias the swing is recorded at bar i+n (the
+    confirmation bar), not at the swing bar itself.  The actual price
+    level is stored alongside.
+    """
+    h = df["high"].values
+    l = df["low"].values
+    sh       = np.zeros(len(df), dtype=bool)
+    sl       = np.zeros(len(df), dtype=bool)
+    sh_price = np.full(len(df), np.nan)
+    sl_price = np.full(len(df), np.nan)
+    for i in range(n, len(df) - n):
+        if h[i] == max(h[i - n: i + n + 1]) and h[i] > max(h[i - n: i]):
+            sh[i + n]       = True
+            sh_price[i + n] = h[i]
+        if l[i] == min(l[i - n: i + n + 1]) and l[i] < min(l[i - n: i]):
+            sl[i + n]       = True
+            sl_price[i + n] = l[i]
+    out               = df.copy()
+    out["swing_high"]       = sh
+    out["swing_low"]        = sl
+    out["swing_high_price"] = sh_price
+    out["swing_low_price"]  = sl_price
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Fair Value Gap (3-candle imbalance)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FVG:
+    idx: int            # index of candle 3 (the bar that creates the gap with candle 1)
+    time: pd.Timestamp
+    direction: str      # 'bull' | 'bear'
+    top: float
+    bottom: float
+    mitigated: bool = False
+    mitigated_idx: int | None = None
+
+
+def detect_fvgs(df: pd.DataFrame) -> list[FVG]:
+    """A bullish FVG exists when low[i] > high[i-2] (gap between c1 and c3).
+    A bearish FVG exists when high[i] < low[i-2]."""
+    h = df["high"].values
+    l = df["low"].values
+    fvgs: list[FVG] = []
+    for i in range(2, len(df)):
+        if l[i] > h[i - 2]:
+            fvgs.append(FVG(i, df.index[i], "bull", l[i], h[i - 2]))
+        elif h[i] < l[i - 2]:
+            fvgs.append(FVG(i, df.index[i], "bear", l[i - 2], h[i]))
+    return fvgs
+
+
+# ---------------------------------------------------------------------------
+# Market Structure Shift (CHoCH / BOS)
+# ---------------------------------------------------------------------------
+
+def detect_mss(df: pd.DataFrame, lookback: int = 50) -> pd.DataFrame:
+    """Mark bars where price breaks the most recent confirmed swing high/low,
+    indicating a market-structure shift (CHoCH) used for confirmation after a
+    liquidity sweep."""
+    sw = swing_points(df, n=2)
+    sh_levels: list[tuple[int, float]] = []
+    sl_levels: list[tuple[int, float]] = []
+    mss_up = np.zeros(len(df), dtype=bool)
+    mss_dn = np.zeros(len(df), dtype=bool)
+    last_break_idx_up = -1
+    last_break_idx_dn = -1
+    h = df["high"].values
+    c = df["close"].values
+    l = df["low"].values
+    for i in range(len(df)):
+        if sw["swing_high"].iat[i]:
+            sh_levels.append((i, float(sw["swing_high_price"].iat[i])))
+        if sw["swing_low"].iat[i]:
+            sl_levels.append((i, float(sw["swing_low_price"].iat[i])))
+        # Trim to lookback window
+        sh_levels = [(j, v) for j, v in sh_levels if i - j <= lookback]
+        sl_levels = [(j, v) for j, v in sl_levels if i - j <= lookback]
+        # Up MSS: close above most recent swing high (use last 5 swing highs)
+        if sh_levels:
+            top = max(v for _, v in sh_levels[-5:])
+            if c[i] > top and i > last_break_idx_up:
+                mss_up[i]         = True
+                last_break_idx_up = i
+        # Down MSS: close below most recent swing low
+        if sl_levels:
+            bot = min(v for _, v in sl_levels[-5:])
+            if c[i] < bot and i > last_break_idx_dn:
+                mss_dn[i]         = True
+                last_break_idx_dn = i
+    out          = df.copy()
+    out["mss_up"] = mss_up
+    out["mss_dn"] = mss_dn
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Liquidity sweep
+# ---------------------------------------------------------------------------
+
+def liquidity_sweep(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    """Detect bars where price wicks beyond a recent swing extreme and closes
+    back inside (liquidity grab / stop hunt).
+
+    Extra columns produced:
+      sweep_high / sweep_high_level — bar swept a prior-window high; level = that high
+      sweep_low  / sweep_low_level  — bar swept a prior-window low;  level = that low
+    """
+    h = df["high"].values
+    l = df["low"].values
+    c = df["close"].values
+    n = len(df)
+    swept_high       = np.zeros(n, dtype=bool)
+    swept_low        = np.zeros(n, dtype=bool)
+    swept_high_level = np.full(n, np.nan)
+    swept_low_level  = np.full(n, np.nan)
+    for i in range(window, n):
+        prior_high = h[i - window: i].max()
+        prior_low  = l[i - window: i].min()
+        if h[i] > prior_high and c[i] < prior_high:
+            swept_high[i]       = True
+            swept_high_level[i] = prior_high
+        if l[i] < prior_low and c[i] > prior_low:
+            swept_low[i]       = True
+            swept_low_level[i] = prior_low
+    out                    = df.copy()
+    out["sweep_high"]       = swept_high
+    out["sweep_low"]        = swept_low
+    out["sweep_high_level"] = swept_high_level
+    out["sweep_low_level"]  = swept_low_level
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Higher-timeframe bias
+# ---------------------------------------------------------------------------
+
+def htf_bias(htf: pd.DataFrame,
+             ema_fast: int = 20,
+             ema_slow: int = 50) -> pd.Series:
+    """Simple EMA-cross bias on HTF closes.  +1 bull, -1 bear, 0 flat."""
+    f = htf["close"].ewm(span=ema_fast, adjust=False).mean()
+    s = htf["close"].ewm(span=ema_slow, adjust=False).mean()
+    bias = pd.Series(0, index=htf.index, dtype=int)
+    bias[f > s] = 1
+    bias[f < s] = -1
+    return bias
+
+
+def align_bias_to_ltf(bias_htf: pd.Series,
+                      ltf_index: pd.DatetimeIndex) -> pd.Series:
+    """Forward-fill HTF bias onto a finer (LTF) index."""
+    return bias_htf.reindex(ltf_index, method="ffill").fillna(0).astype(int)
 
 
 # ---------------------------------------------------------------------------

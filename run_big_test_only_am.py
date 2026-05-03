@@ -25,8 +25,6 @@ from model_2022.backtest import (
     plot_breakdown,
     plot_monthly,
     plot_all_trade_charts,
-    plot_trade_chart_5m,
-    plot_trade_chart_15m,
 )
 
 DATA_PATH   = "1m_data.csv"
@@ -187,6 +185,8 @@ def main() -> None:
     if trades_2020:
         print(f"\nGenerating per-trade charts for {len(trades_2020)} "
               f"2020+ trades → {chart_dir}/")
+        print("  Each trade folder contains: 1d_bias.png, 4h_bias.png, "
+              "15m_context.png, 5m_context.png, 1m_entry.png")
         plot_all_trade_charts(
             trades_2020,
             df1m,
