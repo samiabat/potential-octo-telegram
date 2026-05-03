@@ -110,6 +110,64 @@ def _atr(highs: np.ndarray, lows: np.ndarray, i: int, n: int = 14) -> float:
     return float((highs[i - n: i] - lows[i - n: i]).mean())
 
 
+def _collect_displacement_pending(
+    *,
+    df1m_index: pd.DatetimeIndex,
+    fvgs_by_idx: dict[int, list],
+    obs_by_idx: dict[int, list],
+    sweep_time: pd.Timestamp,
+    mss_time: pd.Timestamp,
+    direction: str,                 # 'long' | 'short'
+    current_bar_i: int,
+    atr: float,
+    min_fvg_size_atr: float,
+    fvg_max_age_bars: int,
+    use_fvg: bool,
+    use_ob: bool,
+    diag: "Diag",
+) -> list[dict]:
+    """Scan the displacement leg [sweep_idx ... min(mss_idx, i)] for
+    bias-aligned FVGs / OBs and return them as `pending` dicts.
+
+    This is the canonical ICT 2022-Model entry: the FVG that lives inside
+    the move which caused the MSS.  Without this back-scan we'd only see
+    FVGs forming AFTER the arm fired, missing the actual displacement FVG.
+    """
+    # 1m bar indices for the sweep and MSS timestamps.  searchsorted with
+    # side='left' picks the first 1m bar at-or-after the timestamp.
+    sweep_idx = int(df1m_index.searchsorted(sweep_time, side="left"))
+    mss_idx   = int(df1m_index.searchsorted(mss_time,   side="left"))
+    upper     = min(mss_idx, current_bar_i)
+    # Don't reach back further than fvg_max_age_bars from now — FVGs older
+    # than the standard age cap would be purged on the very next iteration.
+    lower     = max(sweep_idx, current_bar_i - fvg_max_age_bars)
+    if lower > upper:
+        return []
+
+    wanted_fvg_dir = "bull" if direction == "long" else "bear"
+    wanted_ob_dir  = wanted_fvg_dir
+    out: list[dict] = []
+
+    for j in range(lower, upper + 1):
+        if use_fvg:
+            for fvg in fvgs_by_idx.get(j, []):
+                if fvg.direction != wanted_fvg_dir:
+                    continue
+                diag.fvg_candidates += 1
+                fvg_size = fvg.top - fvg.bottom
+                if atr > 0 and fvg_size < min_fvg_size_atr * atr:
+                    diag.fvg_blocked_size += 1
+                    continue
+                out.append({"type": "fvg", "fvg": fvg, "dir": direction, "born": j})
+        if use_ob:
+            for ob in obs_by_idx.get(j, []):
+                if ob.direction != wanted_ob_dir:
+                    continue
+                diag.ob_candidates += 1
+                out.append({"type": "ob", "ob": ob, "dir": direction, "born": j})
+    return out
+
+
 def _nearest_swing_sl(
     sw_low_prices: np.ndarray,
     sw_high_prices: np.ndarray,
@@ -391,6 +449,26 @@ def run_2022_model(
                             # so existing retrace opportunities are not lost.
                             if not same_sweep:
                                 pending = []
+                            # Back-scan the displacement leg for the canonical
+                            # ICT-2022 entry FVG (the FVG inside the move that
+                            # caused the MSS).  Without this we'd silently miss
+                            # FVGs whose 3rd candle sits between the sweep and
+                            # the bar where the arm becomes visible.
+                            pending.extend(_collect_displacement_pending(
+                                df1m_index=df1m.index,
+                                fvgs_by_idx=fvgs_by_idx,
+                                obs_by_idx=obs_by_idx,
+                                sweep_time=sw,
+                                mss_time=mss,
+                                direction="long",
+                                current_bar_i=i,
+                                atr=_atr(h, l, i),
+                                min_fvg_size_atr=min_fvg_size_atr,
+                                fvg_max_age_bars=fvg_max_age_bars,
+                                use_fvg=use_fvg,
+                                use_ob=use_ob,
+                                diag=diag,
+                            ))
 
         # Bear cascade: bias -1, sweep-high, MSS-dn
         elif bias == -1:
@@ -417,6 +495,21 @@ def run_2022_model(
                             arm_trades = 0
                             if not same_sweep:
                                 pending = []
+                            pending.extend(_collect_displacement_pending(
+                                df1m_index=df1m.index,
+                                fvgs_by_idx=fvgs_by_idx,
+                                obs_by_idx=obs_by_idx,
+                                sweep_time=sw,
+                                mss_time=mss,
+                                direction="short",
+                                current_bar_i=i,
+                                atr=_atr(h, l, i),
+                                min_fvg_size_atr=min_fvg_size_atr,
+                                fvg_max_age_bars=fvg_max_age_bars,
+                                use_fvg=use_fvg,
+                                use_ob=use_ob,
+                                diag=diag,
+                            ))
 
         # Check arm expiry
         is_armed = (

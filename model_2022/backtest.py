@@ -408,14 +408,17 @@ def plot_trade_chart(
     df1m: pd.DataFrame,
     out_path: str,
     trade_num: int = 0,
-    context_bars_before: int = 80,   # 1m bars before sweep
-    context_bars_after: int = 20,    # 1m bars after exit
+    context_bars_before: int = 80,   # 1m bars before ENTRY
+    context_bars_after: int = 80,    # 1m bars after ENTRY (symmetric)
+    min_bars: int = 40,
 ) -> None:
-    """1m entry chart: clean candles + horizontal levels only."""
-    sweep_ts = trade.setup_sweep_time
+    """1m entry chart: clean candles + horizontal levels only.
+
+    Anchored on the ENTRY timestamp so the entry bar sits roughly in the
+    centre of the chart (with symmetric history/future context).
+    """
     entry_ts = trade.entry_time
     exit_ts  = trade.exit_time if trade.exit_time is not None else entry_ts
-    anchor_ts = sweep_ts if sweep_ts is not None else entry_ts
 
     idx_arr = df1m.index
 
@@ -424,10 +427,15 @@ def plot_trade_chart(
             return fallback
         return int(min(idx_arr.searchsorted(ts), len(idx_arr) - 1))
 
-    start_pos = max(0, _find_pos(anchor_ts) - context_bars_before)
-    end_pos   = min(len(idx_arr) - 1, _find_pos(exit_ts) + context_bars_after)
+    entry_pos = _find_pos(entry_ts)
+    exit_pos  = _find_pos(exit_ts)
+    start_pos = max(0, entry_pos - context_bars_before)
+    # Make sure the exit bar is visible if it falls outside the symmetric window
+    end_pos   = min(len(idx_arr) - 1,
+                    max(entry_pos + context_bars_after,
+                        exit_pos + 5))
     chart_df  = df1m.iloc[start_pos : end_pos + 1].copy()
-    if chart_df.empty:
+    if len(chart_df) < min_bars:
         return
 
     n = len(chart_df)
@@ -474,6 +482,7 @@ def _plot_trade_tf_chart(
     trade_num: int = 0,
     context_bars_before: int = 80,
     context_bars_after: int = 6,
+    min_bars: int = 40,
 ) -> None:
     """Generic TF context chart (15m or 5m).
 
@@ -504,7 +513,7 @@ def _plot_trade_tf_chart(
     start_pos  = max(0, anchor_pos - context_bars_before)
     end_pos    = min(len(idx_arr) - 1, entry_pos + context_bars_after)
     chart_df   = df_tf.iloc[start_pos : end_pos + 1].copy()
-    if chart_df.empty:
+    if len(chart_df) < min_bars:
         return
 
     n = len(chart_df)
@@ -641,6 +650,7 @@ def plot_htf_swing_chart(
     context_bars_before: int = 60,
     context_bars_after: int = 5,
     swing_n: int = 3,
+    min_bars: int = 40,
 ) -> None:
     """HTF (4H or Daily) chart with zigzag HH/HL/LH/LL drawing.
 
@@ -651,6 +661,10 @@ def plot_htf_swing_chart(
       • Horizontal lines for entry, SL, TP
       • Vertical dashed line marking the entry bar
     No lower-timeframe detail (no FVG boxes, no 1m noise).
+
+    Skips chart generation entirely when there are fewer than *min_bars*
+    HTF bars in the rendered window (default 40).  Tiny HTF charts at the
+    edges of the dataset are misleading, so they are silently dropped.
     """
     from .data_loader import resample as _resample
     from .ict_primitives import swing_points as _swings
@@ -673,7 +687,7 @@ def plot_htf_swing_chart(
     start_pos = max(0, entry_pos - context_bars_before)
     end_pos   = min(len(idx_arr) - 1, entry_pos + context_bars_after)
     chart_df  = df_sw.iloc[start_pos: end_pos + 1].copy()
-    if chart_df.empty:
+    if len(chart_df) < min_bars:
         return
 
     n = len(chart_df)
@@ -774,17 +788,17 @@ def plot_all_trade_charts(
     df1m: pd.DataFrame,
     charts_dir: str | Path,
     context_bars_before: int = 80,
-    context_bars_after: int = 20,
+    context_bars_after: int = 80,
 ) -> None:
     """Generate five charts per trade, saved into individual subfolders.
 
     Subfolder: {idx:03d}_{date}_{HHMM}_{direction}_{outcome}/
     Files:
-        1d_bias.png      — Daily candles with zigzag HH/HL/LH/LL
-        4h_bias.png      — 4H candles with zigzag HH/HL/LH/LL
-        15m_context.png  — 15m candles (80 bars before sweep)
-        5m_context.png   — 5m candles  (80 bars before sweep)
-        1m_entry.png     — 1m candles  (80 bars before sweep, 20 after exit)
+        1d_bias.png      — Daily candles with zigzag HH/HL/LH/LL  (skipped if <40 bars)
+        4h_bias.png      — 4H candles with zigzag HH/HL/LH/LL     (skipped if <40 bars)
+        15m_context.png  — 15m candles (80 bars before sweep)     (skipped if <40 bars)
+        5m_context.png   — 5m candles  (80 bars before sweep)     (skipped if <40 bars)
+        1m_entry.png     — 1m candles, ENTRY centered (80 before / 80 after)
     Lower-TF charts show only: liquidity level, FVG box, entry, SL, TP.
     HTF charts show zigzag structure + entry/SL/TP.
     """
