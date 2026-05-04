@@ -137,16 +137,26 @@ def _collect_displacement_pending(
     # side='left' picks the first 1m bar at-or-after the timestamp.
     sweep_idx = int(df1m_index.searchsorted(sweep_time, side="left"))
     mss_idx   = int(df1m_index.searchsorted(mss_time,   side="left"))
+    # Extend the lower bound back to cover the 1m bars inside the sweep
+    # candle itself (15m sweep → up to 15 prior 1m bars).  Without this we
+    # miss any bull FVG forming in the same 15m window as the sweep.
+    sweep_window_1m_bars = 15
     upper     = min(mss_idx, current_bar_i)
-    # Don't reach back further than fvg_max_age_bars from now — FVGs older
-    # than the standard age cap would be purged on the very next iteration.
-    lower     = max(sweep_idx, current_bar_i - fvg_max_age_bars)
+    lower     = max(sweep_idx - sweep_window_1m_bars, 0)
     if lower > upper:
         return []
 
     wanted_fvg_dir = "bull" if direction == "long" else "bear"
     wanted_ob_dir  = wanted_fvg_dir
     out: list[dict] = []
+
+    # Use the discovery bar (current_bar_i) as the age-clock anchor for
+    # backfilled items.  Without this, a displacement FVG that formed 15m
+    # before the arm fired would already be near-expired on first sight,
+    # making the back-scan useless when retraces take a few minutes.  Note
+    # the original FVG formation time is preserved on the FVG object itself
+    # (fvg.idx / fvg.time) for correct chart rendering.
+    discovery_born = current_bar_i - 1   # age=1 at discovery → eligible immediately
 
     for j in range(lower, upper + 1):
         if use_fvg:
@@ -158,13 +168,15 @@ def _collect_displacement_pending(
                 if atr > 0 and fvg_size < min_fvg_size_atr * atr:
                     diag.fvg_blocked_size += 1
                     continue
-                out.append({"type": "fvg", "fvg": fvg, "dir": direction, "born": j})
+                out.append({"type": "fvg", "fvg": fvg, "dir": direction,
+                            "born": discovery_born})
         if use_ob:
             for ob in obs_by_idx.get(j, []):
                 if ob.direction != wanted_ob_dir:
                     continue
                 diag.ob_candidates += 1
-                out.append({"type": "ob", "ob": ob, "dir": direction, "born": j})
+                out.append({"type": "ob", "ob": ob, "dir": direction,
+                            "born": discovery_born})
     return out
 
 

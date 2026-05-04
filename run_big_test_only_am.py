@@ -187,12 +187,15 @@ def main() -> None:
               f"2020+ trades → {chart_dir}/")
         print("  Each trade folder contains: 1d_bias.png, 4h_bias.png, "
               "15m_context.png, 5m_context.png, 1m_entry.png")
+        # Symmetric 80/80 around the entry bar so the entry sits in the
+        # middle of the 1m chart (matches the new entry-centered default
+        # in plot_trade_chart).
         plot_all_trade_charts(
             trades_2020,
             df1m,
             chart_dir,
             context_bars_before=80,
-            context_bars_after=20,
+            context_bars_after=80,
         )
     else:
         print("\nNo 2020+ trades found; skipping per-trade chart generation.")
