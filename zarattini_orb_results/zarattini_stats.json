@@ -1,0 +1,23 @@
+{
+  "total_trades": 1171,
+  "hit_ratio_%": 15.63,
+  "avg_r": 0.185,
+  "sum_r": 216.593,
+  "std_r": 3.2477,
+  "sharpe_r": 0.904,
+  "total_pnl_pts": 2033.89,
+  "total_pnl_$": 40677.74,
+  "gross_profit_$": 454160.0,
+  "gross_loss_$": -413482.26,
+  "profit_factor": 1.098,
+  "max_drawdown_$": -41576.34,
+  "max_consec_losses": 29,
+  "by_direction": {
+    "long": 588,
+    "short": 583
+  },
+  "by_outcome": {
+    "stop": 985,
+    "eod": 186
+  }
+}
