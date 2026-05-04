@@ -1,0 +1,20 @@
+{
+  "total_trades": 845,
+  "win_pct": 65.92,
+  "avg_win_pts": 23.77,
+  "avg_loss_pts": -39.02,
+  "avg_r": 0.055,
+  "sum_r": 46.782,
+  "total_pts": 2041.95,
+  "total_dollars": 40839.0,
+  "gross_profit_$": 264831.0,
+  "gross_loss_$": -223992.0,
+  "profit_factor": 1.182,
+  "max_drawdown_$": -23968.0,
+  "max_consec_losses": 9,
+  "by_outcome": {
+    "target": 545,
+    "stop": 261,
+    "expiry": 39
+  }
+}
